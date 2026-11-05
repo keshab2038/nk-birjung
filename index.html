@@ -85,8 +85,12 @@ body.viewas .topbar{top:44px}
 .sb-search-results{position:absolute; top:100%; left:0; right:0; z-index:60; background:#fff; border:1px solid var(--s4); border-radius:9px; box-shadow:var(--shl); margin-top:4px; overflow:hidden}
 .sb-search-result{display:block; width:100%; text-align:left; padding:10px 12px; border:none; background:none; font-size:13px; font-weight:600; color:var(--b2); border-bottom:1px solid var(--s5)}
 .sb-search-result:last-child{border-bottom:none}
-.sb-search-result:hover, .sb-search-result:active{background:var(--gp); color:var(--g1)}
+.sb-search-result:hover, .sb-search-result:active, .sb-search-result.ms-sel{background:var(--gp); color:var(--g1)}
+.sb-search-results{max-height:60vh; overflow-y:auto}
 .sb-search-empty{padding:10px 12px; font-size:12.5px; color:var(--s2)}
+.nav-more{min-width:250px; max-width:calc(100vw - 20px)}
+.nav-more .sb-search-results{position:static; box-shadow:none; max-height:50vh; margin:4px 0 0}
+.nav-more .sb-search-result{display:block; white-space:normal; line-height:1.35}
 
 /* DESKTOP SIDEBAR (hidden on mobile, shown >=900px) */
 .sidebar{display:none}
@@ -3492,7 +3496,7 @@ const PULL_SOURCE = { 'nk_purchase': 'nk_purchase_lite', 'nk_users': 'nk_users_l
 // Samasya: kunai device ma app ghanta-ghanta kholirakhda PURANO build nai
 // chalirahanthyo — naya feature (jastai Petrol, rate Edit button) dekhinnathyo.
 // Ab app le server ko index.html ko version herera "naya version aayo" bhancha.
-const APP_BUILD = '20261023-0900';
+const APP_BUILD = '20261105-1700';
 // Party lai gareko bhuktani (aanshik/peski) — bill sanga sidhai najodine rakam
 if (typeof TABLES !== 'undefined' && !TABLES.includes('nk_party_payment')) TABLES.push('nk_party_payment');
 if (typeof TABLES !== 'undefined' && !TABLES.includes('nk_bank_recon')) TABLES.push('nk_bank_recon');
@@ -4566,7 +4570,7 @@ function buildNavbar(){
     {id:'admin', icon:'⚙'},
   ].filter(m => canAccess(m.id));
   const moreHtml = `<div class="sb-search-wrap" style="padding:4px 4px 8px">
-      <input type="text" id="sb_search_input_mobile" class="sb-search-input" placeholder="🔍 ${t('search')}..." oninput="onMobileSearchInput()" autocomplete="off">
+      <input type="text" id="sb_search_input_mobile" class="sb-search-input" placeholder="🔍 Menu / sub-menu / report khojnu..." oninput="onMobileSearchInput()" onkeydown="menuSearchKey(event,'sb_search_input_mobile','sb_search_results_mobile')" autocomplete="off" enterkeyhint="go">
       <div id="sb_search_results_mobile" class="sb-search-results" style="display:none"></div>
     </div>`
     + moreItems.map(m=>`<button onclick="gotoPage('${m.id}')">${m.icon} ${t(m.id)}</button>`).join('')
@@ -4579,27 +4583,11 @@ function buildNavbar(){
 // mobile "More" menu's own search box (separate DOM ids since the
 // sidebar and the mobile menu can in principle both exist in the DOM,
 // just not both visible at once depending on screen width).
-function onMobileSearchInput(){
-  const query = document.getElementById('sb_search_input_mobile').value;
-  const resultsEl = document.getElementById('sb_search_results_mobile');
-  const results = filterSearchIndex(query);
-  if (results.length===0){
-    resultsEl.innerHTML = query.trim().length>=2 ? `<div class="sb-search-empty">Kehi bhetiyena</div>` : '';
-    resultsEl.style.display = query.trim().length>=2 ? 'block' : 'none';
-    return;
-  }
-  resultsEl.innerHTML = results.map(({item,index}) => `<button class="sb-search-result" onclick="runMobileSearchResult(${index})">${escHtml(item.label)}</button>`).join('');
-  resultsEl.style.display = 'block';
-}
+function onMobileSearchInput(){ _msRenderResults('sb_search_input_mobile','sb_search_results_mobile','runMobileSearchResult'); }
 function runMobileSearchResult(index){
-  const item = SEARCH_INDEX[index];
-  if (!item) return;
-  document.getElementById('sb_search_input_mobile').value = '';
-  document.getElementById('sb_search_results_mobile').style.display = 'none';
   MORE_OPEN = false;
   document.getElementById('navMore').classList.remove('open');
-  if (item.goto){ (new Function(item.goto))(); }
-  else { gotoPage(item.id); }
+  _msRun(index, 'sb_search_input_mobile', 'sb_search_results_mobile');
 }
 function toggleMore(){
   MORE_OPEN = !MORE_OPEN;
@@ -4711,42 +4699,192 @@ const SEARCH_INDEX = [
 // {item, index} pairs so the UI can reference results by their original
 // SEARCH_INDEX position (simpler and safer than serializing the whole
 // object into an onclick attribute).
-function filterSearchIndex(query){
-  const q = (query||'').trim().toLowerCase();
-  if (q.length < 2) return [];
-  return SEARCH_INDEX
-    .map((item, index) => ({item, index}))
-    .filter(({item}) => canAccess(item.id) &&
-      (item.label.toLowerCase().includes(q) || (item.keywords||'').toLowerCase().includes(q))
-    ).slice(0, 8);
+// ═══ MENU SEARCH: sabai menu + sub-menu + report (permission anusar) ═══
+// SEARCH_INDEX (mathi) hatle lekheko thiyo — dherai sub-menu/report chhutthe.
+// Aba SUB_PERMS_ALL + reportTabs() bata AAFAI banchha: naya sub-menu thapda
+// yaha kehi lekhnu pardaina. User lai anumati bhaeko matra dekhinchha
+// (canAccess + canAccessSub). SEARCH_INDEX ka keywords milne entry ma jodincha.
+const MENU_SUB_NAV = {
+  trip:      {entry:"window._tripView='entry'", report:"window._tripView='report'"},
+  hajiri:    {mark:"window._hajView='mark'", salary:"window._hajView='salary'"},
+  attendance:{live:"window._attView='team'", reminder:"window._attView='reminder'", teamreport:"window._attView='teamhajiri'",
+              review:"window._attView='review'", report:"window._attView='report'"},
+  store:     {stock:"window._storeView='stock'", txn:"window._storeView='txn'", reports:"window._storeView='reports'"},
+  landfill:  {entry:"window._lfView='entry'", report:"window._lfView='report'",
+              compost:"window._lfView='compost';window._cmpView='daily'", compostreport:"window._lfView='compost';window._cmpView='report'",
+              kabad:"window._lfView='kabad';window._kabadView='bikri'", kabadrates:"window._lfView='kabad';window._kabadView='rates'",
+              kabadreport:"window._lfView='kabad';window._kabadView='report'"},
+  account:   {purchase:"window._acctView='purchase';window._purView='list'", khata:"window._acctView='purchase';window._purView='khata'",
+              purreport:"window._acctView='purchase';window._purView='report'", parties:"window._acctView='purchase';window._purView='parties'",
+              bank:"window._acctView='bank';window._bankView='accounts'", cheque:"window._acctView='bank';window._bankView='cheque'",
+              statement:"window._acctView='bank';window._bankView='statement'", recon:"window._acctView='bank';window._bankView='recon'"},
+  operation: {staff:"window._opView='staff'", vehicles:"window._opView='vehicles'", roads:"window._opView='roads'", bibaran:"window._opView='bibaran'"},
+  admin:     {users:"window._admView='users'", permissions:"window._admView='permissions'", approver:"window._admView='approver'",
+              team:"window._admView='team'", datafix:"window._admView='datafix'", geofence:"window._admView='geofence'",
+              live:"window._admView='live'", gpshistory:"window._admView='gpshistory'", trash:"window._admView='trash'",
+              security:"window._admView='security'"},
+};
+const MENU_SUB_KW = {
+  'account.statement':'stmt bank statement bibaran khata', 'account.recon':'reconciliation milan bank', 'account.cheque':'chq check',
+  'account.khata':'ledger party khata hisab', 'account.purreport':'purchase report kharid', 'account.parties':'supplier party',
+  'hajiri.salary':'talab tlb payroll', 'hajiri.mark':'hajir attendance present', 'attendance.live':'team live hajiri',
+  'attendance.teamreport':'team hajiri report', 'attendance.review':'approve approval pending', 'attendance.report':'attendance report',
+  'landfill.entry':'taul weight weighbridge', 'landfill.report':'landfill masik monthly', 'landfill.compostreport':'compost report masik',
+  'landfill.kabad':'kabad scrap kabadi bikri kharid', 'landfill.kabadrates':'kabad rate', 'landfill.kabadreport':'kabad report bikri income', 'store.txn':'in out jinsi',
+  'operation.roads':'road thau route sadak', 'operation.bibaran':'kagajat document bibaran', 'admin.gpshistory':'gps history track route',
+  'admin.live':'gps live location map', 'admin.security':'login history ip session suraksha', 'admin.trash':'delete restore recycle',
+  'reports.tds':'tds vat kar tax', 'reports.ird':'ird masik vat tax', 'reports.hajiri':'staff hajiri report', 'reports.mahanagar':'mahanagar staff',
+};
+// Sabai bhasha (EN/NE/Bhojpuri) ko naam — jun bhasha ma type gare pani bhetiyos
+function _msAllLang(key){
+  try{ return Object.keys(TRANSLATIONS).map(l=>TRANSLATIONS[l]?.[key]).filter(Boolean).join(' '); }catch(e){ return ''; }
 }
-function onSidebarSearchInput(){
-  const query = document.getElementById('sb_search_input').value;
-  const resultsEl = document.getElementById('sb_search_results');
+// Attendance ka tab haru ma tab-button jastai thap sart (team lead / approver)
+function _msAttSubOk(sub){
+  try{
+    if (sub==='live' || sub==='reminder' || sub==='teamreport') return isTeamLead() && canAccessSub('attendance', sub);
+    if (sub==='review') return _canSeeReviewTabs() && canApproveAttendance() && canAccessSub('attendance','review');
+    if (sub==='report') return (canApproveAttendance() || canAccessSub('attendance','report')) && (_canSeeReviewTabs() || isTeamLead());
+  }catch(e){ return false; }
+  return canAccessSub('attendance', sub);
+}
+function _msNorm(s){
+  return String(s==null?'':s).replace(/[०-९]/g, d=>'०१२३४५६७८९'.indexOf(d))
+    .toLowerCase().replace(/[^\p{L}\p{N}\s]/gu,' ').replace(/\s+/g,' ').trim();
+}
+function _msModLabel(mid){
+  const en = (ALL_MODULES.find(m=>m.id===mid)||{}).label || mid;
+  let tr = ''; try{ tr = t(mid); }catch(e){}
+  return {show: (tr && tr!==mid) ? tr : en, en, tr};
+}
+function _msKey(page, goto){
+  const a = [...String(goto||'').matchAll(/window\.(_[A-Za-z]+)\s*=\s*'([^']*)'/g)].map(m=>m[1]+'='+m[2]);
+  return page + '|' + a.join(';');
+}
+let MENU_SEARCH_IDX = [];
+function buildMenuSearchIndex(){
+  const out = [], byKey = {};
+  const push = (e)=>{ const k = _msKey(e.id, e.goto); if (byKey[k]){ byKey[k].keywords += ' '+(e.keywords||''); return; } e._k = k; byKey[k]=e; out.push(e); };
+  // 1) Top-level menu
+  ALL_MODULES.concat([{id:'profile'}]).forEach(m=>{
+    if (m.id!=='profile' && !canAccess(m.id)) return;
+    const L = _msModLabel(m.id);
+    push({id:m.id, label:L.show, goto:'', keywords:[L.en, _msAllLang(m.id), m.id].join(' '), level:0});
+  });
+  // 2) Sub-menu / report (anumati bhaeko matra)
+  Object.keys(SUB_PERMS_ALL).forEach(mid=>{
+    if (!canAccess(mid)) return;
+    const nav = MENU_SUB_NAV[mid]; if (!nav && mid!=='reports') return;
+    const L = _msModLabel(mid);
+    let subs = SUB_PERMS_ALL[mid];
+    if (mid==='reports'){ try{ subs = reportTabs(); }catch(e){ subs = []; } }
+    subs.forEach(sd=>{
+      const nv = mid==='reports' ? `window._repTab='${sd.id}'` : nav[sd.id];
+      if (!nv) return;                                    // page nabhaeko adhikar (jastai Fuel Rate) — search ma hoina
+      const ok = mid==='attendance' ? _msAttSubOk(sd.id) : canAccessSub(mid, sd.id);
+      if (!ok) return;
+      const parent = sd.parent ? ((SUB_PERMS_ALL[mid]||[]).find(x=>x.id===sd.parent)||{}).label : '';
+      push({id:mid, label:`${L.show} › ${parent?parent+' › ':''}${sd.label}`, goto:`${nv};gotoPage('${mid}')`,
+            keywords:[_msAllLang(mid), mid, sd.id, mid==='reports'?'report':'', MENU_SUB_KW[mid+'.'+sd.id]||''].join(' '), level:1});
+    });
+  });
+  // 3) Purano hatle lekheko list — keywords jodne / chhuteko thapne
+  SEARCH_INDEX.forEach(it=>{
+    if (it.id!=='profile' && !canAccess(it.id)) return;
+    if (it.id==='kabad' && canAccess('landfill')) return;   // Birgunj: Kabad = Landfill › Kabad (mathi nai chha)
+    const vs = [...String(it.goto||'').matchAll(/window\.(_[A-Za-z]+)\s*=\s*'([^']*)'/g)];
+    if (vs.some(m=>!subViewAllowed(m[1], m[2]))) return;
+    if (it.id==='attendance' && /'review'/.test(it.goto||'') && !_msAttSubOk('review')) return;
+    const k = _msKey(it.id, it.goto);
+    const hit = byKey[k] || (k.endsWith('|') ? null : out.find(e=>e._k && e._k.startsWith(k+';')));
+    if (hit){ hit.keywords += ' '+it.label+' '+(it.keywords||''); return; }
+    push({id:it.id, label:it.label, goto:it.goto||'', keywords:it.keywords||'', level:1});
+  });
+  out.forEach(e=>{ e._l = _msNorm(e.label); e._h = e._l+' '+_msNorm(e.keywords); });
+  MENU_SEARCH_IDX = out;
+  return out;
+}
+// Type gareko sabai shabda (kunai kram ma) milnu parcha: "kabad rep", "bank stmt"...
+function filterSearchIndex(query){
+  const q = _msNorm(query);
+  if (q.length < 2) return [];
+  const toks = q.split(' ');
+  return buildMenuSearchIndex()
+    .map((item, index) => ({item, index}))
+    .filter(({item}) => toks.every(tk => item._h.includes(tk)))
+    .map(r => { const l=r.item._l; r.s = (l.startsWith(toks[0])?0:l.split(' ').some(w=>w.startsWith(toks[0]))?1:toks.every(tk=>l.includes(tk))?2:3) + (r.item.level?0.5:0); return r; })
+    .sort((a,b)=>a.s-b.s)
+    .slice(0, 12);
+}
+function _msRenderResults(inputId, resultsId, runFn){
+  const inp = document.getElementById(inputId), resultsEl = document.getElementById(resultsId);
+  if (!inp || !resultsEl) return;
+  const query = inp.value;
   const results = filterSearchIndex(query);
+  inp._msSel = 0;
   if (results.length===0){
-    resultsEl.innerHTML = query.trim().length>=2 ? `<div class="sb-search-empty">Kehi bhetiyena</div>` : '';
-    resultsEl.style.display = query.trim().length>=2 ? 'block' : 'none';
+    resultsEl.innerHTML = _msNorm(query).length>=2 ? `<div class="sb-search-empty">Kehi bhetiyena</div>` : '';
+    resultsEl.style.display = _msNorm(query).length>=2 ? 'block' : 'none';
     return;
   }
-  resultsEl.innerHTML = results.map(({item,index}) => `<button class="sb-search-result" onclick="runSidebarSearchResult(${index})">${escHtml(item.label)}</button>`).join('');
+  resultsEl.innerHTML = results.map(({item,index},i) => `<button class="sb-search-result${i===0?' ms-sel':''}" onmousedown="event.preventDefault()" onclick="${runFn}(${index})">${escHtml(item.label)}</button>`).join('');
   resultsEl.style.display = 'block';
 }
-function runSidebarSearchResult(index){
-  const item = SEARCH_INDEX[index];
+// Enter = pahilo (wa ↑↓ le chhaneko) result; Esc = khali
+function menuSearchKey(e, inputId, resultsId){
+  const resultsEl = document.getElementById(resultsId), inp = document.getElementById(inputId);
+  const btns = resultsEl ? [...resultsEl.querySelectorAll('.sb-search-result')] : [];
+  if (e.key==='Escape'){ inp.value=''; resultsEl.style.display='none'; inp.blur(); return; }
+  if (!btns.length) return;
+  let sel = inp._msSel||0;
+  if (e.key==='ArrowDown' || e.key==='ArrowUp'){
+    e.preventDefault();
+    sel = (sel + (e.key==='ArrowDown'?1:-1) + btns.length) % btns.length;
+    inp._msSel = sel;
+    btns.forEach((b,i)=>b.classList.toggle('ms-sel', i===sel));
+    try{ btns[sel].scrollIntoView({block:'nearest'}); }catch(_){}
+  } else if (e.key==='Enter'){
+    e.preventDefault(); btns[Math.min(sel, btns.length-1)].click();
+  }
+}
+function _msRun(index, inputId, resultsId){
+  const item = MENU_SEARCH_IDX[index];
   if (!item) return;
-  document.getElementById('sb_search_input').value = '';
-  document.getElementById('sb_search_results').style.display = 'none';
+  const inp = document.getElementById(inputId), res = document.getElementById(resultsId);
+  if (inp){ inp.value = ''; inp.blur(); }
+  if (res) res.style.display = 'none';
   if (item.goto){ (new Function(item.goto))(); }
   else { gotoPage(item.id); }
 }
+function onSidebarSearchInput(){ _msRenderResults('sb_search_input','sb_search_results','runSidebarSearchResult'); }
+function runSidebarSearchResult(index){ _msRun(index, 'sb_search_input', 'sb_search_results'); }
+// "/" wa Ctrl+K: menu search kholne (desktop sidebar, natra mobile "Thap" menu)
+function focusMenuSearch(){
+  const sb = document.getElementById('sb_search_input');
+  if (sb && sb.offsetParent !== null){ sb.focus(); sb.select(); return true; }
+  if (!document.getElementById('app')?.classList.contains('show')) return false;
+  MORE_OPEN = true;
+  document.getElementById('navMore')?.classList.add('open');
+  const mb = document.getElementById('sb_search_input_mobile');
+  if (mb){ setTimeout(()=>{ try{ mb.focus(); mb.select(); }catch(e){} }, 30); return true; }
+  return false;
+}
+document.addEventListener('keydown', e=>{
+  const a = document.activeElement;
+  const typing = a && (/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) || a.isContentEditable);
+  const ck = (e.ctrlKey || e.metaKey) && !e.altKey && (e.key==='k' || e.key==='K');
+  const slash = e.key==='/' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey;
+  if (!ck && !slash) return;
+  if (isAnyModalOpen()) return;
+  if (focusMenuSearch()) e.preventDefault();
+}, true);
 function buildSidebar(){
   const sb = document.getElementById('sidebar');
   if (!sb) return;
   const onAdminTab = (tab) => CUR_PAGE==='admin' && (window._admView||'users')===tab;
   let html = '';
   html += `<div class="sb-search-wrap">
-    <input type="text" id="sb_search_input" class="sb-search-input" placeholder="🔍 ${t('search')}..." oninput="onSidebarSearchInput()" autocomplete="off">
+    <input type="text" id="sb_search_input" class="sb-search-input" placeholder="🔍 Menu / report khojnu ( / )" oninput="onSidebarSearchInput()" onkeydown="menuSearchKey(event,'sb_search_input','sb_search_results')" onblur="setTimeout(()=>{const r=document.getElementById('sb_search_results');if(r&&document.activeElement!==this)r.style.display='none';},150)" autocomplete="off" enterkeyhint="go">
     <div id="sb_search_results" class="sb-search-results" style="display:none"></div>
   </div>`;
   html += SIDEBAR_PRIMARY.filter(m=>canAccess(m.id)).map(m=>sbLinkHtml(m, CUR_PAGE===m.id, `gotoPage('${m.id}')`)).join('');
@@ -4765,7 +4903,19 @@ function buildSidebar(){
   const sysItems = SIDEBAR_SYSTEM.filter(m=>canAccess(m.id));
   if (sysItems.length){ html += `<div class="sb-section-label">${t('sectionSystem')}</div>` + sysItems.map(m=>sbLinkHtml(m, CUR_PAGE===m.id, `gotoPage('${m.id}')`)).join(''); }
 
+  // Sync/refresh le sidebar feri banauda menu-search ma type gardai gareko kura naharos
+  const _oldQ = document.getElementById('sb_search_input');
+  const _keep = _oldQ && (_oldQ.value || document.activeElement===_oldQ)
+    ? {v:_oldQ.value, f:document.activeElement===_oldQ, s:_oldQ.selectionStart, e:_oldQ.selectionEnd} : null;
   sb.innerHTML = html;
+  if (_keep){
+    const nq = document.getElementById('sb_search_input');
+    if (nq){
+      nq.value = _keep.v;
+      if (_keep.f){ try{ nq.focus({preventScroll:true}); nq.setSelectionRange(_keep.s, _keep.e); }catch(e){} }
+      if (_keep.v) onSidebarSearchInput();
+    }
+  }
   const usernameEl = document.getElementById('topbarUsername');
   if (usernameEl) usernameEl.textContent = CURRENT_USER ? (CURRENT_USER.full_name || CURRENT_USER.username) : '';
 }
@@ -22165,6 +22315,357 @@ if (document.readyState === 'loading'){
 } else {
   boot();
 }
+</script>
+<script>
+/* ═══ NK TYPE-TO-SEARCH (page bhitra: report / list / table) ═══════════
+   Search box nabhaeko sabai report table, list (row-card) ra report ka
+   lamo row-list ma type garera chito khojna milne box aafai thapincha.
+   - Data / hisab / total / export KEHI PANI badlidaina — row display matra.
+   - Pahile nai search bhaeko list (liveSearchHtml / data-search, Team Live,
+     Att. Report) chhoddincha — dohoro box nabanos.
+   - Data-entry form (input bhaeko row) ma box nadine.
+   - Sync / edit pachhi page feri bane pani type gareko kura ra focus rahancha.
+   - Keyboard: kunai field ma nabhaeko bela type garda sidhai page ko search
+     box ma jancha. ( "/" wa Ctrl+K = menu search )
+   ══════════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  if (window.__nkTypeSearch) return;
+  window.__nkTypeSearch = true;
+
+  var MIN_ITEMS = 5;          // table / row-card: yo bhanda kam bhae box nadine
+  var MIN_FLEX  = 6;          // report ka flex-between row-list
+  var HIDE = 'data-nk-tsearch-hide';
+  var WRAP = 'data-nk-tsearch';
+  var DEV = '०१२३४५६७८९';
+  var OWN_SEARCH_ATTRS = ['data-search','data-tls','data-ars'];
+
+  try{
+    var st = document.createElement('style');
+    st.setAttribute('data-nk-tsearch-css','1');
+    st.textContent =
+      '['+HIDE+']{display:none !important}' +
+      '.nk-ts{display:flex;align-items:center;gap:8px;margin:0 0 10px}' +
+      '.nk-ts-box{position:relative;flex:1;min-width:0}' +
+      '.nk-ts-in{width:100%;box-sizing:border-box;padding:9px 34px 9px 12px;border:1.5px solid var(--s3,#cbd5e1);border-radius:var(--rsm,9px);' +
+        'font-size:14px;background:#fff;color:var(--b1,#0f172a);outline:none;-webkit-appearance:none;appearance:none}' +
+      '.nk-ts-in:focus{border-color:var(--g4,#16a34a);box-shadow:0 0 0 3px rgba(22,163,74,.15)}' +
+      '.nk-ts-x{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:24px;height:24px;line-height:24px;text-align:center;' +
+        'border-radius:50%;background:var(--s4,#e2e8f0);color:var(--b3,#334155);font-size:13px;cursor:pointer;display:none;user-select:none}' +
+      '.nk-ts-box.has-q .nk-ts-x{display:block}' +
+      '.nk-ts-count{font-size:12px;font-weight:700;color:var(--s1,#64748b);white-space:nowrap;min-width:38px;text-align:right}' +
+      '.nk-ts-count.zero{color:var(--r,#dc2626)}' +
+      '@media print{.nk-ts{display:none !important}}';
+    document.head.appendChild(st);
+  }catch(e){}
+
+  /* ---------- helpers ---------- */
+  function norm(s){
+    return String(s == null ? '' : s)
+      .replace(/[०-९]/g, function(d){ return DEV.indexOf(d); })
+      .toLowerCase().replace(/\s+/g,' ').trim();
+  }
+  var cache = (typeof WeakMap === 'function') ? new WeakMap() : null;
+  function hasField(el){ return !!el.querySelector('input:not([type=hidden]):not([type=checkbox]):not([type=radio]),select,textarea'); }
+  function textOf(el){
+    var fields = hasField(el);
+    if (cache && !fields && cache.has(el)) return cache.get(el);
+    var out = [];
+    var w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(n){
+        var p = n.parentNode && n.parentNode.nodeName;
+        return (p==='OPTION'||p==='SCRIPT'||p==='STYLE'||p==='TEXTAREA') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    var n; while ((n = w.nextNode())) out.push(n.nodeValue);
+    if (fields){
+      el.querySelectorAll('input,select,textarea').forEach(function(f){
+        if (/^(hidden|password|checkbox|radio|file)$/.test(f.type)) return;
+        if (f.tagName==='SELECT'){ var o=f.options[f.selectedIndex]; if (o) out.push(o.text); }
+        else out.push(f.value);
+      });
+    }
+    // title / data-search jasta lukeko label pani (icon-matra cell)
+    var ttl = el.getAttribute && el.getAttribute('title'); if (ttl) out.push(ttl);
+    var raw = norm(out.join(' '));
+    var hay = raw + ' ' + raw.replace(/,/g,'');           // "Rs 1,500" lai "1500" le pani
+    if (cache && !fields) cache.set(el, hay);
+    return hay;
+  }
+  function matches(el, tokens){
+    var hay = textOf(el);
+    for (var i=0;i<tokens.length;i++){ if (hay.indexOf(tokens[i]) === -1) return false; }
+    return true;
+  }
+  function hasOwnSearch(el){
+    for (var i=0;i<OWN_SEARCH_ATTRS.length;i++){ if (el.hasAttribute(OWN_SEARCH_ATTRS[i])) return true; }
+    return false;
+  }
+  // Yo samuha mathi page ko aafnai search box chha ki (nearest .card wa root bhitra, aghi)
+  function foreignSearchBefore(anchor, root){
+    var scope = anchor.parentElement && anchor.parentElement.closest('.card');
+    if (!scope || !root.contains(scope)) scope = anchor.parentElement;
+    var ins = scope ? scope.querySelectorAll('input[type=search], .live-search-box, input[placeholder^="🔍"]') : [];
+    for (var i=0;i<ins.length;i++){
+      var x = ins[i];
+      if (x.classList.contains('nk-ts-in') || x.classList.contains('sb-search-input')) continue;
+      if (x.compareDocumentPosition(anchor) & Node.DOCUMENT_POSITION_FOLLOWING) return true;
+    }
+    return false;
+  }
+
+  /* ---------- samuha (group) khojne ---------- */
+  function isDataRow(tr){
+    if (!tr || tr.tagName!=='TR') return false;
+    if (tr.querySelector('th')) return false;
+    if (tr.cells.length === 1 && tr.cells[0].colSpan > 1) return false;   // "Data chhaina" / section row
+    if (/total/i.test(tr.className||'')) return false;
+    var f = tr.cells[0];
+    if (f && /^(grand total|sub ?total|total|sum|जम्मा|कुल|jamma|kul)\b/.test(norm(f.textContent))) return false;
+    return true;
+  }
+  function tableRows(tb){
+    var rows = [];
+    for (var b=0;b<tb.tBodies.length;b++){
+      for (var r=0;r<tb.tBodies[b].rows.length;r++){
+        var tr = tb.tBodies[b].rows[r];
+        if (isDataRow(tr)) rows.push(tr);
+      }
+    }
+    return rows;
+  }
+  function childItems(parent, test){ return Array.prototype.filter.call(parent.children, test); }
+  function isCard(c){ return c.classList && c.classList.contains('row-card'); }
+  function isFlexRow(c){ return c.classList && c.classList.contains('flex-between') && c.tagName==='DIV'; }
+  function itemsOf(g){
+    if (g.kind === 'table') return tableRows(g.table);
+    return childItems(g.parent, g.kind === 'cards' ? isCard : isFlexRow);
+  }
+
+  function findGroups(root){
+    var groups = [];
+    var cardParents = [];
+    root.querySelectorAll('.row-card').forEach(function(rc){
+      var p = rc.parentElement; if (p && cardParents.indexOf(p) === -1) cardParents.push(p);
+    });
+    var bigCardParents = cardParents.filter(function(p){ return childItems(p, isCard).length >= MIN_ITEMS; });
+
+    // 1) row-card list
+    bigCardParents.forEach(function(p){
+      var its = childItems(p, isCard);
+      if (its.some(hasOwnSearch)) return;                        // liveSearchHtml le chhopeko
+      if (p.closest('['+WRAP+']')) return;
+      if (its.filter(hasField).length > its.length/2) return;     // data-entry form
+      if (foreignSearchBefore(its[0], root)) return;
+      groups.push({kind:'cards', parent:p, anchor:its[0], container:p, sig:'c'+its.length});
+    });
+    // 2) table
+    root.querySelectorAll('table').forEach(function(tb){
+      var rows = tableRows(tb);
+      if (rows.length < MIN_ITEMS) return;
+      var rc = tb.closest('.row-card');
+      if (rc && bigCardParents.indexOf(rc.parentElement) !== -1) return;   // card list le nai khojcha
+      if (rows.some(hasOwnSearch)) return;
+      if (rows.filter(hasField).length > rows.length/2) return;
+      var anchor = tb.closest('.tbl-wrap') || tb;
+      if (foreignSearchBefore(anchor, root)) return;
+      var sig = Array.prototype.slice.call(tb.querySelectorAll('thead th'),0,3).map(function(h){return norm(h.textContent);}).join('/');
+      groups.push({kind:'table', table:tb, anchor:anchor, container:anchor.parentNode, sig:'t'+sig});
+    });
+    // 3) report ko flex-between row-list
+    var flexParents = [];
+    root.querySelectorAll('div.flex-between').forEach(function(fr){
+      var p = fr.parentElement; if (p && flexParents.indexOf(p) === -1) flexParents.push(p);
+    });
+    flexParents.forEach(function(p){
+      if (p.closest('.nav-more, #sidebar, ['+WRAP+'], .lf-row')) return;
+      var rc = p.closest('.row-card');
+      if (rc && bigCardParents.indexOf(rc.parentElement) !== -1) return;
+      var its = childItems(p, isFlexRow);
+      if (its.length < MIN_FLEX) return;
+      if (its.some(hasOwnSearch) || its.some(hasField)) return;
+      if (foreignSearchBefore(its[0], root)) return;
+      groups.push({kind:'flex', parent:p, anchor:its[0], container:p, sig:'f'});
+    });
+    return groups;
+  }
+
+  /* ---------- state ---------- */
+  var queries = {};
+  var lastCtx = {};
+  var focusInfo = null;
+
+  function ctxOf(rootId){
+    var parts = [];
+    if (rootId === 'main'){
+      parts.push(typeof CUR_PAGE !== 'undefined' ? CUR_PAGE : '');
+      document.querySelectorAll('#main .tab-btn.active, #main .chip.active').forEach(function(n){ parts.push(n.textContent.trim()); });
+    } else {
+      var tt = document.getElementById('modalT');
+      parts.push('modal', tt ? tt.textContent : '');
+      document.querySelectorAll('#modalB .tab-btn.active, #modalB .chip.active').forEach(function(n){ parts.push(n.textContent.trim()); });
+    }
+    return parts.join('|');
+  }
+
+  /* ---------- filter ---------- */
+  function applyFilter(wrap){
+    var g = wrap.__nk; if (!g || !g.container || !g.container.isConnected) return;
+    var inp = wrap.querySelector('.nk-ts-in');
+    var cnt = wrap.querySelector('.nk-ts-count');
+    var box = wrap.querySelector('.nk-ts-box');
+    var q = norm(inp.value);
+    var tokens = q ? q.split(' ') : [];
+    var items = itemsOf(g);
+    var shown = 0;
+    items.forEach(function(it){
+      var ok = !tokens.length || matches(it, tokens);
+      if (ok){ if (it.hasAttribute(HIDE)) it.removeAttribute(HIDE); shown++; }
+      else if (!it.hasAttribute(HIDE)) it.setAttribute(HIDE,'');
+    });
+    var label = tokens.length ? (shown + ' / ' + items.length) : String(items.length);
+    if (cnt.textContent !== label) cnt.textContent = label;
+    cnt.classList.toggle('zero', tokens.length > 0 && shown === 0);
+    box.classList.toggle('has-q', !!inp.value);
+    if (g.key) queries[g.key] = inp.value;
+  }
+
+  function makeWrap(g){
+    var wrap = document.createElement('div');
+    wrap.className = 'nk-ts';
+    wrap.setAttribute(WRAP,'1');
+    wrap.innerHTML =
+      '<div class="nk-ts-box"><input class="nk-ts-in" type="text" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">' +
+      '<span class="nk-ts-x" role="button" aria-label="Clear">✕</span></div>' +
+      '<span class="nk-ts-count"></span>';
+    var ne = false; try{ ne = (typeof CURRENT_LANG !== 'undefined' && CURRENT_LANG === 'ne'); }catch(e){}
+    wrap.querySelector('.nk-ts-in').placeholder = ne ? '🔍 यहाँ खोज्नुहोस् — नाम, गाडी, वडा, मिति, रकम…' : '🔍 Yaha khojnu — naam, gaadi, ward, miti, rakam…';
+    wrap.__nk = g;
+    return wrap;
+  }
+
+  /* ---------- enhance ---------- */
+  function enhance(rootId){
+    var root = document.getElementById(rootId === 'main' ? 'main' : 'modalB');
+    if (!root) return;
+    var ctx = ctxOf(rootId);
+    if (lastCtx[rootId] !== ctx){
+      Object.keys(queries).forEach(function(k){ if (k.indexOf(rootId+'§') === 0) delete queries[k]; });
+      lastCtx[rootId] = ctx;
+    }
+    var groups = findGroups(root);
+    var keepWraps = [], keepItems = [];
+    groups.forEach(function(g, idx){
+      g.key = rootId + '§' + ctx + '§' + g.kind + idx + '§' + g.sig;
+      var prev = g.anchor.previousElementSibling;
+      var wrap = (prev && prev.hasAttribute && prev.hasAttribute(WRAP)) ? prev : null;
+      var created = false;
+      if (!wrap){
+        wrap = makeWrap(g);
+        g.container.insertBefore(wrap, g.anchor);
+        wrap.querySelector('.nk-ts-in').value = queries[g.key] || '';
+        created = true;
+      }
+      wrap.__nk = g;
+      keepWraps.push(wrap);
+      itemsOf(g).forEach(function(i){ keepItems.push(i); });
+      applyFilter(wrap);
+      if (created && focusInfo && focusInfo.key === g.key){
+        var active = document.activeElement;
+        var lost = (!active || active === document.body || active === document.documentElement);
+        if (lost && (!focusInfo.out || (performance.now() - focusInfo.t) < 600)){
+          var inp = wrap.querySelector('.nk-ts-in');
+          try{ inp.focus({preventScroll:true}); inp.setSelectionRange(focusInfo.start, focusInfo.end); }catch(e){}
+        }
+      }
+    });
+    root.querySelectorAll('['+WRAP+']').forEach(function(w){ if (keepWraps.indexOf(w) === -1) w.remove(); });
+    root.querySelectorAll('['+HIDE+']').forEach(function(n){ if (keepItems.indexOf(n) === -1) n.removeAttribute(HIDE); });
+  }
+
+  /* ---------- scheduling ---------- */
+  var pending = {};
+  var raf = window.requestAnimationFrame || function(f){ return setTimeout(f, 16); };
+  function schedule(rootId){
+    if (pending[rootId]) return;
+    pending[rootId] = true;
+    raf(function(){
+      pending[rootId] = false;
+      try{ enhance(rootId); }catch(e){ if (window.console) console.warn('type-search skipped:', e); }
+    });
+  }
+  function watch(id, rootId){
+    var el = document.getElementById(id);
+    if (!el || typeof MutationObserver !== 'function') return;
+    new MutationObserver(function(muts){
+      for (var i=0;i<muts.length;i++){
+        var tg = muts[i].target;
+        if (tg && tg.nodeType === 1 && tg.closest && tg.closest('['+WRAP+']')) continue;
+        schedule(rootId); return;
+      }
+    }).observe(el, {childList:true, subtree:true});
+    schedule(rootId);
+  }
+
+  /* ---------- events ---------- */
+  document.addEventListener('input', function(e){
+    var inp = e.target;
+    if (!inp || !inp.classList || !inp.classList.contains('nk-ts-in')) return;
+    var wrap = inp.closest('['+WRAP+']'); if (!wrap) return;
+    applyFilter(wrap);
+    if (focusInfo){ focusInfo.start = inp.selectionStart; focusInfo.end = inp.selectionEnd; }
+  });
+  document.addEventListener('click', function(e){
+    var x = e.target && e.target.closest && e.target.closest('.nk-ts-x');
+    if (!x) return;
+    var wrap = x.closest('['+WRAP+']'); var inp = wrap.querySelector('.nk-ts-in');
+    inp.value = ''; applyFilter(wrap); inp.focus();
+  });
+  document.addEventListener('focusin', function(e){
+    var inp = e.target;
+    if (!inp || !inp.classList || !inp.classList.contains('nk-ts-in')) return;
+    var wrap = inp.closest('['+WRAP+']');
+    focusInfo = {key: wrap && wrap.__nk ? wrap.__nk.key : null, start: inp.selectionStart, end: inp.selectionEnd, t: performance.now(), out:false};
+  });
+  document.addEventListener('focusout', function(e){
+    if (focusInfo && e.target && e.target.classList && e.target.classList.contains('nk-ts-in')){
+      focusInfo.out = true; focusInfo.t = performance.now();
+    }
+  });
+  document.addEventListener('keyup', function(e){
+    var inp = e.target;
+    if (focusInfo && inp && inp.classList && inp.classList.contains('nk-ts-in')){ focusInfo.start = inp.selectionStart; focusInfo.end = inp.selectionEnd; }
+  });
+
+  // Kunai field ma nabhaeko bela type garda sidhai page ko (pahilo dekhine) search box ma
+  document.addEventListener('keydown', function(e){
+    var a = document.activeElement;
+    if (e.key === 'Escape' && a && a.classList && a.classList.contains('nk-ts-in') && a.value){
+      a.value = ''; applyFilter(a.closest('['+WRAP+']')); e.preventDefault(); return;
+    }
+    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!e.key || e.key.length !== 1 || e.key === '/' || e.key === ' ') return;
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;
+    if (a && a.isContentEditable) return;
+    var app = document.getElementById('app');
+    if (!app || !app.classList.contains('show')) return;            // login screen
+    var modalOpen = document.querySelector('.modal-bg.open');
+    var scope = modalOpen ? document.querySelector('#modal.open #modalB') : document.getElementById('main');
+    if (!scope) return;
+    var cands = scope.querySelectorAll('.nk-ts-in, .live-search-box');
+    var target = null;
+    for (var i=0;i<cands.length;i++){ if (cands[i].offsetParent !== null){ target = cands[i]; break; } }
+    if (!target) return;
+    e.preventDefault();
+    target.focus();
+    target.value += e.key;
+    target.dispatchEvent(new Event('input', {bubbles:true}));
+  }, true);
+
+  function start(){ watch('main','main'); watch('modalB','modal'); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
 </script>
 </body>
 </html>
