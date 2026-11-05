@@ -11114,5 +11114,309 @@ if (document.readyState === 'loading'){
   boot();
 }
 </script>
+<script>
+/* ═══ NK TYPE-TO-SEARCH (reports / lists) ═══════════════════════════
+   Sabai menu/sub-menu ka report table ra list (row-card) ma
+   keyboard bata type garera chito khojna milne search box.
+   - Data / hisab / totals KEHI PANI badlidaina: rows matra
+     display:none hunchha (CSV export, totals, edit/delete ustai).
+   - Table: tbody ka rows filter hunchha; <tfoot> / total row sadhai dekhinchha.
+   - List: .row-card haru filter hunchha.
+   - Page re-render (sync / edit / delete) pachhi query ra focus farkancha.
+   - Kunai input/select ma type garirakheko bela kehi gardaina; arkai
+     bela jahan pani type garyo bhane page ko search box ma jancha.
+   ══════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  if (window.__nkTypeSearch) return;
+  window.__nkTypeSearch = true;
+
+  var MIN_ITEMS = 5;                 // yo bhanda kam row bhae search box nadekhaune
+  var HIDE = 'data-nk-tsearch-hide';
+  var WRAP = 'data-nk-tsearch';
+  var DEV = '०१२३४५६७८९';
+
+  /* ---------- CSS ---------- */
+  try{
+    var st = document.createElement('style');
+    st.setAttribute('data-nk-tsearch-css','1');
+    st.textContent =
+      '['+HIDE+']{display:none !important}' +
+      '.nk-ts{display:flex;align-items:center;gap:8px;margin:0 0 10px}' +
+      '.nk-ts-box{position:relative;flex:1;min-width:0}' +
+      '.nk-ts-in{width:100%;padding:10px 34px 10px 12px;border:1.5px solid var(--s3,#cbd5e1);border-radius:var(--rsm,9px);' +
+        'font-size:14px;background:var(--w,#fff);color:var(--b1,#0f172a);outline:none;-webkit-appearance:none;appearance:none}' +
+      '.nk-ts-in:focus{border-color:var(--g4,#16a34a);box-shadow:0 0 0 3px rgba(22,163,74,.15)}' +
+      '.nk-ts-x{position:absolute;right:6px;top:50%;transform:translateY(-50%);width:24px;height:24px;line-height:24px;text-align:center;' +
+        'border-radius:50%;background:var(--s4,#e2e8f0);color:var(--b3,#334155);font-size:14px;cursor:pointer;display:none;user-select:none}' +
+      '.nk-ts-box.has-q .nk-ts-x{display:block}' +
+      '.nk-ts-count{font-size:12px;font-weight:700;color:var(--s1,#64748b);white-space:nowrap;min-width:38px;text-align:right}' +
+      '.nk-ts-count.zero{color:var(--r,#dc2626)}';
+    document.head.appendChild(st);
+  }catch(e){}
+
+  /* ---------- helpers ---------- */
+  function norm(s){
+    return String(s == null ? '' : s)
+      .replace(/[०-९]/g, function(d){ return DEV.indexOf(d); })
+      .toLowerCase().replace(/\s+/g,' ').trim();
+  }
+  function textOf(el){
+    var hasField = el.querySelector('input,select,textarea');
+    var out = [];
+    var w = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+      acceptNode: function(n){
+        var p = n.parentNode && n.parentNode.nodeName;
+        return (p==='OPTION'||p==='SCRIPT'||p==='STYLE'||p==='TEXTAREA') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    var n; while ((n = w.nextNode())) out.push(n.nodeValue);
+    if (hasField){
+      el.querySelectorAll('input,select,textarea').forEach(function(f){
+        if (f.type==='hidden'||f.type==='password'||f.type==='checkbox'||f.type==='radio'||f.type==='file') return;
+        if (f.tagName==='SELECT'){ var o=f.options[f.selectedIndex]; if (o) out.push(o.text); }
+        else out.push(f.value);
+      });
+    }
+    var raw = norm(out.join(' '));
+    var hay = raw + ' ' + raw.replace(/,/g,'');          // "Rs 1,500" lai "1500" le pani khojna milne
+    return hay;
+  }
+  function matches(el, tokens){
+    var hay = textOf(el);
+    for (var i=0;i<tokens.length;i++){ if (hay.indexOf(tokens[i]) === -1) return false; }
+    return true;
+  }
+
+  /* ---------- item finders ---------- */
+  function isDataRow(tr){
+    if (!tr || tr.tagName!=='TR') return false;
+    if (tr.querySelector('th')) return false;                         // header-jasto row
+    if (tr.cells.length === 1 && tr.cells[0].colSpan > 1) return false; // "Data chhaina" / section row
+    if (/total/i.test(tr.className||'')) return false;
+    var f = tr.cells[0];
+    if (f && /^(grand total|sub ?total|total|sum|जम्मा|कुल)\b/.test(norm(f.textContent))) return false;
+    return true;
+  }
+  function tableRows(tb){
+    var rows = [];
+    for (var b=0;b<tb.tBodies.length;b++){
+      for (var r=0;r<tb.tBodies[b].rows.length;r++){
+        var tr = tb.tBodies[b].rows[r];
+        if (isDataRow(tr)) rows.push(tr);
+      }
+    }
+    return rows;
+  }
+  function cardItems(parent){
+    return Array.prototype.filter.call(parent.children, function(c){ return c.classList && c.classList.contains('row-card'); });
+  }
+  function itemsOf(g){ return g.kind === 'table' ? tableRows(g.table) : cardItems(g.parent); }
+
+  function findGroups(root){
+    var groups = [];
+    root.querySelectorAll('table').forEach(function(tb){
+      if (tb.closest('['+WRAP+']')) return;
+      var rows = tableRows(tb);
+      if (rows.length < MIN_ITEMS) return;
+      var anchor = tb.closest('.tbl-wrap') || tb;
+      var sig = Array.prototype.slice.call(tb.querySelectorAll('thead th'),0,3).map(function(h){return norm(h.textContent);}).join('/');
+      groups.push({kind:'table', table:tb, anchor:anchor, container:anchor.parentNode, sig:sig});
+    });
+    var byParent = [];
+    root.querySelectorAll('.row-card').forEach(function(rc){
+      var p = rc.parentElement; if (!p) return;
+      if (byParent.indexOf(p) === -1) byParent.push(p);
+    });
+    byParent.forEach(function(p){
+      var its = cardItems(p);
+      if (its.length < MIN_ITEMS) return;
+      groups.push({kind:'cards', parent:p, anchor:its[0], container:p, sig:''});
+    });
+    return groups;
+  }
+
+  /* ---------- state ---------- */
+  var queries = {};                         // key -> query (sirf same page/tab ma jhaldo)
+  var lastCtx = {};                         // root id -> ctx
+  var focusInfo = null;                     // {key,start,end,t,out}
+
+  function ctxOf(rootId){
+    var parts = [];
+    if (rootId === 'main'){
+      parts.push(typeof CUR_PAGE !== 'undefined' ? CUR_PAGE : '');
+      document.querySelectorAll('#main .tab-btn.active, #main .chip.active').forEach(function(n){ parts.push(n.textContent.trim()); });
+    } else {
+      var t = document.getElementById('modalT');
+      parts.push('modal', t ? t.textContent : '');
+      document.querySelectorAll('#modalB .tab-btn.active, #modalB .chip.active').forEach(function(n){ parts.push(n.textContent.trim()); });
+    }
+    return parts.join('|');
+  }
+
+  /* ---------- filter ---------- */
+  function applyFilter(wrap){
+    var g = wrap.__nk; if (!g || !g.container || !g.container.isConnected) return;
+    var inp = wrap.querySelector('.nk-ts-in');
+    var cnt = wrap.querySelector('.nk-ts-count');
+    var box = wrap.querySelector('.nk-ts-box');
+    var q = norm(inp.value);
+    var tokens = q ? q.split(' ') : [];
+    var items = itemsOf(g);
+    var shown = 0;
+    items.forEach(function(it){
+      var ok = !tokens.length || matches(it, tokens);
+      if (ok){ if (it.hasAttribute(HIDE)) it.removeAttribute(HIDE); shown++; }
+      else if (!it.hasAttribute(HIDE)) it.setAttribute(HIDE,'');
+    });
+    var label = tokens.length ? (shown + ' / ' + items.length) : String(items.length);
+    if (cnt.textContent !== label) cnt.textContent = label;
+    cnt.classList.toggle('zero', tokens.length > 0 && shown === 0);
+    box.classList.toggle('has-q', !!inp.value);
+    if (g.key) queries[g.key] = inp.value;
+  }
+
+  function makeWrap(g){
+    var wrap = document.createElement('div');
+    wrap.className = 'nk-ts';
+    wrap.setAttribute(WRAP,'1');
+    wrap.innerHTML =
+      '<div class="nk-ts-box"><input class="nk-ts-in" type="text" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="search">' +
+      '<span class="nk-ts-x" role="button" aria-label="Clear">✕</span></div>' +
+      '<span class="nk-ts-count"></span>';
+    var ph = '';
+    try{ ph = (typeof t === 'function' && t('search')) ? t('search') : ''; }catch(e){}
+    wrap.querySelector('.nk-ts-in').placeholder = '🔍 ' + (ph && ph !== 'search' ? ph : 'Search') + '… (type)';
+    wrap.__nk = g;
+    return wrap;
+  }
+
+  /* ---------- enhance ---------- */
+  function enhance(rootId){
+    var root = document.getElementById(rootId === 'main' ? 'main' : 'modalB');
+    if (!root) return;
+    var ctx = ctxOf(rootId);
+    if (lastCtx[rootId] !== ctx){
+      Object.keys(queries).forEach(function(k){ if (k.indexOf(rootId+'§') === 0) delete queries[k]; });
+      lastCtx[rootId] = ctx;
+    }
+    var groups = findGroups(root);
+    var keepWraps = [], keepItems = [];
+    groups.forEach(function(g, idx){
+      g.key = rootId + '§' + ctx + '§' + g.kind + idx + '§' + g.sig;
+      var prev = g.anchor.previousElementSibling;
+      var wrap = (prev && prev.hasAttribute && prev.hasAttribute(WRAP)) ? prev : null;
+      var created = false;
+      if (!wrap){
+        wrap = makeWrap(g);
+        g.container.insertBefore(wrap, g.anchor);
+        wrap.querySelector('.nk-ts-in').value = queries[g.key] || '';
+        created = true;
+      }
+      wrap.__nk = g;                           // closure ko naya reference
+      keepWraps.push(wrap);
+      itemsOf(g).forEach(function(i){ keepItems.push(i); });
+      applyFilter(wrap);
+      if (created && focusInfo && focusInfo.key === g.key){
+        var active = document.activeElement;
+        var lost = (!active || active === document.body || active === document.documentElement);
+        if (lost && (!focusInfo.out || (performance.now() - focusInfo.t) < 600)){
+          var inp = wrap.querySelector('.nk-ts-in');
+          try{ inp.focus({preventScroll:true}); inp.setSelectionRange(focusInfo.start, focusInfo.end); }catch(e){}
+        }
+      }
+    });
+    // stale search box (group ghatera 5 bhanda kam bhayo wa hatiyo) → hata + hidden rows khol
+    root.querySelectorAll('['+WRAP+']').forEach(function(w){ if (keepWraps.indexOf(w) === -1) w.remove(); });
+    root.querySelectorAll('['+HIDE+']').forEach(function(n){ if (keepItems.indexOf(n) === -1) n.removeAttribute(HIDE); });
+  }
+
+  /* ---------- scheduling (MutationObserver) ---------- */
+  var pending = {};
+  var raf = window.requestAnimationFrame || function(f){ return setTimeout(f, 16); };
+  function schedule(rootId){
+    if (pending[rootId]) return;
+    pending[rootId] = true;
+    raf(function(){
+      pending[rootId] = false;
+      try{ enhance(rootId); }catch(e){ if (window.console) console.warn('type-search skipped:', e); }
+    });
+  }
+  function watch(id, rootId){
+    var el = document.getElementById(id);
+    if (!el || typeof MutationObserver !== 'function') return;
+    new MutationObserver(function(muts){
+      for (var i=0;i<muts.length;i++){
+        var tg = muts[i].target;
+        // hamro aafnai search box bhitra ko badlav (count text) le feri loop nachalaos
+        if (tg && tg.nodeType === 1 && tg.closest && tg.closest('['+WRAP+']')) continue;
+        schedule(rootId); return;
+      }
+    }).observe(el, {childList:true, subtree:true});
+    schedule(rootId);
+  }
+
+  /* ---------- events ---------- */
+  document.addEventListener('input', function(e){
+    var inp = e.target;
+    if (!inp || !inp.classList || !inp.classList.contains('nk-ts-in')) return;
+    var wrap = inp.closest('['+WRAP+']'); if (!wrap) return;
+    applyFilter(wrap);
+    if (focusInfo) { focusInfo.start = inp.selectionStart; focusInfo.end = inp.selectionEnd; }
+  });
+  document.addEventListener('click', function(e){
+    var x = e.target && e.target.closest && e.target.closest('.nk-ts-x');
+    if (!x) return;
+    var wrap = x.closest('['+WRAP+']'); var inp = wrap.querySelector('.nk-ts-in');
+    inp.value = ''; applyFilter(wrap); inp.focus();
+  });
+  document.addEventListener('focusin', function(e){
+    var inp = e.target;
+    if (!inp || !inp.classList || !inp.classList.contains('nk-ts-in')) return;
+    var wrap = inp.closest('['+WRAP+']');
+    focusInfo = {key: wrap && wrap.__nk ? wrap.__nk.key : null, start: inp.selectionStart, end: inp.selectionEnd, t: performance.now(), out:false};
+  });
+  document.addEventListener('focusout', function(e){
+    if (focusInfo && e.target && e.target.classList && e.target.classList.contains('nk-ts-in')){
+      focusInfo.out = true; focusInfo.t = performance.now();
+    }
+  });
+  document.addEventListener('keyup', function(e){
+    var inp = e.target;
+    if (focusInfo && inp && inp.classList && inp.classList.contains('nk-ts-in')){ focusInfo.start = inp.selectionStart; focusInfo.end = inp.selectionEnd; }
+  });
+
+  // Keyboard type garda (kunai field ma nabhaeko bela) seedhai page ko search box ma jane.
+  document.addEventListener('keydown', function(e){
+    var a = document.activeElement;
+    if (e.key === 'Escape' && a && a.classList && a.classList.contains('nk-ts-in') && a.value){
+      a.value = ''; applyFilter(a.closest('['+WRAP+']')); e.preventDefault(); return;
+    }
+    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!e.key || e.key.length !== 1) return;                      // printable key matra
+    if (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)) return;  // field ma type gariraheko
+    if (a && a.isContentEditable) return;
+    if (a && a.tagName === 'BUTTON' && e.key === ' ') return;      // button ko Space bigarne
+    var app = document.getElementById('app');
+    if (app && !app.classList.contains('show')) return;            // login screen
+    if (document.querySelector('.modal-bg.open') && !document.querySelector('#modal.open #modalB .nk-ts-in')) return;
+    var scope = document.querySelector('#modal.open #modalB') || document.getElementById('main');
+    if (!scope) return;
+    var cands = scope.querySelectorAll('.nk-ts-in');
+    var target = null;
+    for (var i=0;i<cands.length;i++){ if (cands[i].offsetParent !== null){ target = cands[i]; break; } }
+    if (!target) return;
+    e.preventDefault();
+    target.focus();
+    target.value += e.key;
+    target.dispatchEvent(new Event('input', {bubbles:true}));
+  }, true);
+
+  /* ---------- start ---------- */
+  function start(){ watch('main','main'); watch('modalB','modal'); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
+</script>
 </body>
 </html>
