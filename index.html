@@ -3496,7 +3496,7 @@ const PULL_SOURCE = { 'nk_purchase': 'nk_purchase_lite', 'nk_users': 'nk_users_l
 // Samasya: kunai device ma app ghanta-ghanta kholirakhda PURANO build nai
 // chalirahanthyo — naya feature (jastai Petrol, rate Edit button) dekhinnathyo.
 // Ab app le server ko index.html ko version herera "naya version aayo" bhancha.
-const APP_BUILD = '20261105-1700';
+const APP_BUILD = '20261105-1900';
 // Party lai gareko bhuktani (aanshik/peski) — bill sanga sidhai najodine rakam
 if (typeof TABLES !== 'undefined' && !TABLES.includes('nk_party_payment')) TABLES.push('nk_party_payment');
 if (typeof TABLES !== 'undefined' && !TABLES.includes('nk_bank_recon')) TABLES.push('nk_bank_recon');
@@ -4812,7 +4812,12 @@ function filterSearchIndex(query){
   return buildMenuSearchIndex()
     .map((item, index) => ({item, index}))
     .filter(({item}) => toks.every(tk => item._h.includes(tk)))
-    .map(r => { const l=r.item._l; r.s = (l.startsWith(toks[0])?0:l.split(' ').some(w=>w.startsWith(toks[0]))?1:toks.every(tk=>l.includes(tk))?2:3) + (r.item.level?0.5:0); return r; })
+    .map(r => { const l=r.item._l, w=l.split(' ');
+      // naam mai sabai shabda → pahile; tespachhi naam ko suru / shabda ko suru; keywords le matra milne pachhi
+      const inLabel = toks.filter(tk=>l.includes(tk)).length;
+      r.s = (toks.length-inLabel)*10 + (l.startsWith(toks[0])?0:w.some(x=>x.startsWith(toks[0]))?1:2) + (r.item.level?0.5:0)
+            - (toks.length>1 && w.some(x=>x.startsWith(toks[toks.length-1])) ? 0.3 : 0);
+      return r; })
     .sort((a,b)=>a.s-b.s)
     .slice(0, 12);
 }
@@ -22663,6 +22668,491 @@ if (document.readyState === 'loading'){
   }, true);
 
   function start(){ watch('main','main'); watch('modalB','modal'); }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
+  else start();
+})();
+</script>
+<script>
+/* ═══ NK SEARCH-SELECT: lamo dropdown ma type garera khojne ══════════════
+   8 wa badhi option bhaeko jun sukai <select> (Party, Staff, Gaadi, Item...)
+   thichda scroll garnu satta search sahitko list khulcha:
+   - Naam ko kunai bhag type garnu ("pash road" → Pashupati Road carrier...)
+   - Enter = pahilo, ↑↓ = chhannu, Esc / Back = banda
+   - Asli <select> nai rahancha: value + onchange pahile jastai chalcha,
+     save / data logic KEHI badlidaina.
+   - Saal/mahina/gate (bs-pick) ra number-matra list native nai rahancha.
+   - Kunai select ma chahidaina bhane: data-nk-native="1"
+   ══════════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  if (window.__nkPicker) return;
+  var MIN_OPTS = 8;
+  var DEV = '०१२३४५६७८९';
+  var cur = null;              // {sel, bg, inp, list, items, idx}
+  var touch = null;            // touchstart sthiti (scroll ki tap chhutyauna)
+
+  try{
+    var st = document.createElement('style');
+    st.textContent =
+      '.nk-pk-bg{position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:10050;display:flex;align-items:flex-end;justify-content:center}' +
+      '@media(min-width:700px){.nk-pk-bg{align-items:center}}' +
+      '.nk-pk{background:#fff;width:100%;max-width:560px;max-height:86vh;height:86vh;border-radius:18px 18px 0 0;display:flex;flex-direction:column;box-shadow:0 -8px 30px rgba(0,0,0,.25);overflow:hidden}' +
+      '@media(min-width:700px){.nk-pk{border-radius:16px;height:auto;max-height:80vh}}' +
+      '.nk-pk-hd{display:flex;align-items:center;gap:8px;padding:12px 14px 6px}' +
+      '.nk-pk-t{flex:1;font-weight:800;font-size:15px;color:var(--b1,#0f172a);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.nk-pk-x{border:none;background:var(--s5,#f1f5f9);color:var(--b2,#1e293b);width:34px;height:34px;border-radius:10px;font-size:16px;cursor:pointer}' +
+      '.nk-pk-sw{padding:4px 14px 8px;position:relative}' +
+      '.nk-pk-in{width:100%;box-sizing:border-box;padding:12px 40px 12px 14px;font-size:16px;border:2px solid var(--g4,#16a34a);border-radius:12px;outline:none;background:#fff;color:var(--b1,#0f172a)}' +
+      '.nk-pk-cnt{position:absolute;right:26px;top:50%;transform:translateY(-50%);font-size:11.5px;font-weight:700;color:var(--s1,#64748b)}' +
+      '.nk-pk-ls{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding:0 6px 10px;min-height:120px}' +
+      '.nk-pk-it{display:block;width:100%;text-align:left;border:none;background:none;padding:12px 12px;font-size:15px;color:var(--b1,#0f172a);border-bottom:1px solid var(--s5,#f1f5f9);border-radius:8px;cursor:pointer;line-height:1.3}' +
+      '.nk-pk-it.on{background:var(--gp,#f0fdf4);color:var(--g1,#14532d)}' +
+      '.nk-pk-it.cur{font-weight:800}' +
+      '.nk-pk-it.cur::after{content:" ✓";color:var(--g3,#15803d)}' +
+      '.nk-pk-it[disabled]{color:var(--s2,#94a3b8);cursor:default}' +
+      '.nk-pk-it mark{background:#fef08a;color:inherit;border-radius:3px;padding:0 1px}' +
+      '.nk-pk-gr{padding:10px 12px 4px;font-size:11.5px;font-weight:800;color:var(--s1,#64748b);text-transform:uppercase;letter-spacing:.3px}' +
+      '.nk-pk-em{padding:22px 12px;text-align:center;color:var(--s1,#64748b);font-size:14px}';
+    document.head.appendChild(st);
+  }catch(e){}
+
+  function norm(s){
+    return String(s==null?'':s).replace(/[०-९]/g, function(d){ return DEV.indexOf(d); })
+      .toLowerCase().replace(/[.,()\-_/\\'"`]+/g,' ').replace(/\s+/g,' ').trim();
+  }
+  function esc(s){ return String(s).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
+
+  function eligible(sel){
+    if (!sel || sel.tagName !== 'SELECT') return false;
+    if (sel.multiple || sel.size > 1 || sel.disabled) return false;
+    if (sel.getAttribute('data-nk-native')) return false;
+    if (sel.closest('.bs-pick, .nk-pk-bg, #loginScreen')) return false;
+    var opts = sel.options, real = 0, nonNum = 0;
+    for (var i=0;i<opts.length;i++){
+      var o = opts[i]; if (o.value === '' && i === 0) continue;
+      real++;
+      if (!/^\s*[\d०-९]+\s*$/.test(o.text)) nonNum++;
+    }
+    return real >= MIN_OPTS && nonNum > 0;     // number-matra (ghanta/minute/gate) native nai
+  }
+  function titleOf(sel){
+    var f = sel.closest('.field'); var l = f && f.querySelector('label');
+    var t = l ? l.textContent.trim() : '';
+    if (!t && sel.options[0] && sel.options[0].value === '') t = sel.options[0].text;
+    return t || 'Chhannu';
+  }
+
+  function build(){
+    var sel = cur.sel, items = [];
+    var kids = sel.children;
+    for (var i=0;i<kids.length;i++){
+      var k = kids[i];
+      if (k.tagName === 'OPTGROUP'){
+        items.push({grp:k.label});
+        for (var j=0;j<k.children.length;j++) items.push(optItem(k.children[j], k.label));
+      } else if (k.tagName === 'OPTION') items.push(optItem(k, ''));
+    }
+    cur.items = items;
+  }
+  function optItem(o, grp){
+    return {opt:o, text:o.text, n:norm(o.text + ' ' + (grp||'')), dis:o.disabled, val:o.value};
+  }
+  function hl(text, toks){
+    if (!toks.length) return esc(text);
+    // devanagari ank → latin (eutai lambai) gareko lowercase ma khojera original ma mark
+    var src = String(text), out = '', marks = [];
+    var lowRaw = src.toLowerCase().replace(/[०-९]/g, function(d){ return DEV.indexOf(d); });
+    toks.forEach(function(tk){ var p = lowRaw.indexOf(tk); if (p >= 0) marks.push([p, p+tk.length]); });
+    if (!marks.length) return esc(src);
+    marks.sort(function(a,b){ return a[0]-b[0]; });
+    var pos = 0;
+    marks.forEach(function(m){ if (m[0] < pos) return; out += esc(src.slice(pos, m[0])) + '<mark>' + esc(src.slice(m[0], m[1])) + '</mark>'; pos = m[1]; });
+    return out + esc(src.slice(pos));
+  }
+  function render(){
+    var q = norm(cur.inp.value), toks = q ? q.split(' ') : [];
+    var html = '', shown = [], lastGrp = null, total = 0;
+    var ranked = [];
+    cur.items.forEach(function(it, i){
+      if (it.grp !== undefined) return;
+      total++;
+      if (toks.length && !toks.every(function(tk){ return it.n.indexOf(tk) >= 0; })) return;
+      var r = 0;
+      if (toks.length){
+        var words = it.n.split(' ');
+        r = it.n.indexOf(toks[0]) === 0 ? 0 : (words.some(function(w){ return w.indexOf(toks[0]) === 0; }) ? 1 : 2);
+      }
+      ranked.push({it:it, i:i, r:r});
+    });
+    if (toks.length) ranked.sort(function(a,b){ return a.r - b.r || a.i - b.i; });
+    ranked.forEach(function(x){
+      var it = x.it;
+      var g = it.opt.parentNode && it.opt.parentNode.tagName === 'OPTGROUP' ? it.opt.parentNode.label : null;
+      if (!toks.length && g !== lastGrp && g){ html += '<div class="nk-pk-gr">'+esc(g)+'</div>'; }
+      lastGrp = g;
+      var isCur = it.opt.selected;
+      html += '<button type="button" class="nk-pk-it'+(isCur?' cur':'')+'" data-i="'+shown.length+'"'+(it.dis?' disabled':'')+'>' +
+              (it.val === '' ? '<span style="color:var(--s1,#64748b)">'+esc(it.text || '— khali —')+'</span>' : hl(it.text, toks)) + '</button>';
+      shown.push(it);
+    });
+    if (!shown.length) html = '<div class="nk-pk-em">Kehi bhetiyena — arko shabda type garnu</div>';
+    cur.list.innerHTML = html;
+    cur.shown = shown;
+    cur.cnt.textContent = toks.length ? (shown.length + '/' + total) : String(total);
+    // pahilo milne (wa haalko chhaneko) highlight
+    var start = 0;
+    if (!toks.length){ for (var i=0;i<shown.length;i++){ if (shown[i].opt.selected){ start = i; break; } } }
+    else { for (var j=0;j<shown.length;j++){ if (!shown[j].dis && shown[j].val !== ''){ start = j; break; } } }
+    move(start, true);
+  }
+  function move(i, center){
+    var btns = cur.list.querySelectorAll('.nk-pk-it');
+    if (!btns.length){ cur.idx = -1; return; }
+    i = Math.max(0, Math.min(btns.length-1, i));
+    cur.idx = i;
+    for (var k=0;k<btns.length;k++) btns[k].classList.toggle('on', k===i);
+    try{ btns[i].scrollIntoView({block: center ? 'center' : 'nearest'}); }catch(e){}
+  }
+  function choose(i){
+    var it = cur && cur.shown && cur.shown[i];
+    if (!it || it.dis) return;
+    var sel = cur.sel, opt = it.opt;
+    if (!sel.isConnected && sel.id){                 // sync le page feri banayo — naya select ma rakhne
+      var ns = document.getElementById(sel.id);
+      if (ns && ns.tagName === 'SELECT'){
+        sel = ns; opt = null;
+        for (var q=0;q<ns.options.length;q++){ if (ns.options[q].value === it.val){ opt = ns.options[q]; break; } }
+        if (!opt){ close(false); return; }
+      }
+    }
+    var changed = !opt.selected;
+    opt.selected = true;
+    close(false);
+    if (changed){
+      sel.dispatchEvent(new Event('input', {bubbles:true}));
+      sel.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+    var coarse = false; try{ coarse = window.matchMedia('(pointer:coarse)').matches; }catch(x){}
+    if (!coarse){ try{ sel.focus({preventScroll:true}); }catch(e){} }   // desktop: Tab le arko field ma jana milos
+  }
+
+  function open(sel, firstChar){
+    if (cur) close(false);
+    var bg = document.createElement('div');
+    bg.className = 'nk-pk-bg';
+    bg.innerHTML = '<div class="nk-pk" role="dialog" aria-modal="true">' +
+      '<div class="nk-pk-hd"><div class="nk-pk-t"></div><button type="button" class="nk-pk-x" aria-label="Banda">✕</button></div>' +
+      '<div class="nk-pk-sw"><input class="nk-pk-in" type="text" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="done" placeholder="🔍 Naam type garnu..."><span class="nk-pk-cnt"></span></div>' +
+      '<div class="nk-pk-ls"></div></div>';
+    document.body.appendChild(bg);
+    cur = {sel:sel, bg:bg, inp:bg.querySelector('.nk-pk-in'), list:bg.querySelector('.nk-pk-ls'), cnt:bg.querySelector('.nk-pk-cnt'), idx:0};
+    bg.querySelector('.nk-pk-t').textContent = titleOf(sel);
+    build();
+    if (firstChar) cur.inp.value = firstChar;
+    render();
+    // Mobile: keyboard ley list chhopna nadina sano delay pachhi focus
+    setTimeout(function(){ try{ cur && cur.inp.focus({preventScroll:true}); }catch(e){} }, 30);
+    bg.addEventListener('mousedown', function(e){ if (e.target === bg) e.preventDefault(); });
+    bg.addEventListener('click', function(e){
+      if (e.target === bg || e.target.closest('.nk-pk-x')){ close(false); return; }
+      var b = e.target.closest('.nk-pk-it'); if (b) choose(+b.getAttribute('data-i'));
+    });
+    cur.inp.addEventListener('input', render);
+    cur.inp.addEventListener('keydown', function(e){
+      if (e.key === 'ArrowDown'){ e.preventDefault(); move(cur.idx+1); }
+      else if (e.key === 'ArrowUp'){ e.preventDefault(); move(cur.idx-1); }
+      else if (e.key === 'PageDown'){ e.preventDefault(); move(cur.idx+8); }
+      else if (e.key === 'PageUp'){ e.preventDefault(); move(cur.idx-8); }
+      else if (e.key === 'Enter'){ e.preventDefault(); if (cur.idx >= 0) choose(cur.idx); }
+      else if (e.key === 'Escape'){ e.preventDefault(); e.stopPropagation(); close(false); }
+      else if (e.key === 'Tab'){ e.preventDefault(); if (cur.idx >= 0) choose(cur.idx); }
+    });
+    try{ window.__nkNav && window.__nkNav.overlayOpened('pick'); }catch(e){}
+  }
+  function close(fromBack){
+    if (!cur) return;
+    var c = cur; cur = null;
+    window.__nkPickJustClosed = Date.now();
+    try{ c.bg.remove(); }catch(e){}
+    if (!fromBack){ try{ window.__nkNav && window.__nkNav.overlayClosed('pick'); }catch(e){} }
+  }
+
+  /* ---------- trigger: asli dropdown ko satta yo list ---------- */
+  document.addEventListener('touchstart', function(e){
+    var s = e.target && e.target.closest && e.target.closest('select');
+    touch = (s && eligible(s)) ? {sel:s, x:e.touches[0].clientX, y:e.touches[0].clientY, t:Date.now()} : null;
+  }, {capture:true, passive:true});
+  document.addEventListener('touchend', function(e){
+    if (!touch) return;
+    var s = e.target && e.target.closest && e.target.closest('select');
+    var t = e.changedTouches && e.changedTouches[0];
+    var moved = t ? (Math.abs(t.clientX-touch.x) + Math.abs(t.clientY-touch.y)) : 0;
+    var ok = s === touch.sel && moved < 12;
+    var sel = touch.sel; touch = null;
+    if (!ok) return;                            // scroll gareko — dropdown kholnu hudaina
+    e.preventDefault();                         // native picker (Android/iOS) rokne
+    open(sel);
+  }, {capture:true, passive:false});
+  document.addEventListener('mousedown', function(e){
+    if (e.button !== 0) return;
+    var s = e.target && e.target.closest && e.target.closest('select');
+    if (!s || !eligible(s)) return;
+    e.preventDefault();                          // desktop native dropdown rokne
+    open(s);
+  }, true);
+  document.addEventListener('keydown', function(e){
+    var s = document.activeElement;
+    if (cur || !s || s.tagName !== 'SELECT' || !eligible(s)) return;
+    if (e.ctrlKey || e.metaKey) return;
+    var k = e.key;
+    if (k === 'Enter' || k === ' ' || k === 'F4' || (e.altKey && (k === 'ArrowDown' || k === 'ArrowUp'))){
+      e.preventDefault(); open(s); return;
+    }
+    if (!e.altKey && k && k.length === 1 && k !== ' '){ e.preventDefault(); open(s, k); }
+  }, true);
+  // iOS ko "Next/Previous" (keyboard mathi ko arrow) le select ma focus pathauda pani
+  document.addEventListener('focusin', function(e){
+    var s = e.target;
+    if (cur || !s || s.tagName !== 'SELECT' || !eligible(s)) return;
+    var coarse = false; try{ coarse = window.matchMedia('(pointer:coarse)').matches; }catch(x){}
+    if (!coarse || (touch && touch.sel === s)) return;
+    if (window.__nkPickJustClosed && Date.now() - window.__nkPickJustClosed < 400) return;
+    setTimeout(function(){ if (!cur && document.activeElement === s){ try{ s.blur(); }catch(x){} open(s); } }, 0);
+  }, true);
+
+  window.__nkPicker = {
+    isOpen: function(){ return !!cur; },
+    closeFromBack: function(){ close(true); },
+    open: open, eligible: eligible
+  };
+})();
+</script>
+<script>
+/* ═══ NK BACK BUTTON (Android / iOS swipe / Windows / browser) ═══════════
+   Pahile mobile ko Back thichda app nai banda hunthyo. Aba:
+   1) Kunai list/form (modal), dropdown search, "Thap" menu khuleko bhae → tyo banda
+      (form ma bhareko kura save nabhaeko bhae pahile sodhcha)
+   2) Natra → aghillo menu / tab ma farkancha (scroll position sahit)
+   3) Home ma pugepachhi pahilo Back ma "feri thichnu" sandesh, tespachhi app banda
+   Browser history (pushState) matra — URL / data / login ma kehi asar chhaina.
+   ══════════════════════════════════════════════════════════════════════ */
+(function(){
+  'use strict';
+  if (window.__nkNav || !window.history || !history.pushState) return;
+  var SID = Math.random().toString(36).slice(2, 10);
+  var N = {ready:false, restoring:false, fromPop:0, preY:0, baseline:null};
+  var VIEW_RE = /^_[a-z][A-Za-z0-9]*(View|Tab)$/;
+
+  function snap(){
+    var o = {};
+    for (var k in window){
+      if (!VIEW_RE.test(k)) continue;
+      var v; try{ v = window[k]; }catch(e){ continue; }
+      if (v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') o[k] = v;
+    }
+    return o;
+  }
+  function keyOf(page, v){
+    var ks = Object.keys(v).sort(), s = page + '|';
+    ks.forEach(function(k){ if (v[k] !== undefined) s += k + '=' + v[k] + ';'; });
+    return s;
+  }
+  function curPage(){ try{ return CUR_PAGE; }catch(e){ return 'dashboard'; } }
+  function pageState(extra){
+    var v = snap(), p = curPage();
+    var s = {nk:'page', sid:SID, page:p, v:v, k:keyOf(p, v), y:0};
+    if (extra) for (var x in extra) s[x] = extra[x];
+    return s;
+  }
+  function curKey(){ return keyOf(curPage(), snap()); }
+  function st(){ var s = history.state; return (s && s.sid === SID) ? s : null; }
+  function appShown(){ var a = document.getElementById('app'); return !!(a && a.classList.contains('show')); }
+
+  /* ---------- page / tab badliyo → history ma ek kadam ---------- */
+  function record(){
+    if (!N.ready || N.restoring || !appShown()) return;
+    var s = st();
+    if (anyModalOpen()) return;                                // form khulai — muni ko page refresh matra
+    if (window.__nkPicker && window.__nkPicker.isOpen()) return;
+    try{ if (MORE_OPEN) return; }catch(x){}
+    var ns = pageState();
+    if (s && s.nk === 'page' && s.k === ns.k) return;          // sync/refresh — eutai page
+    if (s && (s.nk === 'more' || s.nk === 'pick' || s.nk === 'modal' || (s.nk === 'page' && s.dup))){
+      history.replaceState(ns, ''); return;
+    }
+    if (s && s.nk === 'page'){ s.y = N.preY; history.replaceState(s, ''); }
+    history.pushState(ns, '');
+  }
+
+  /* ---------- modal (form/list) ---------- */
+  var MODAL_IDS = ['modal','connModal','sqlModal'];
+  function openModalIds(){ return MODAL_IDS.filter(function(id){ var m = document.getElementById(id); return m && m.classList.contains('open'); }); }
+  function anyModalOpen(){ return openModalIds().length > 0; }
+  function takeBaseline(){
+    var b = document.getElementById('modalB'); if (!b) return;
+    var m = new WeakMap();
+    b.querySelectorAll('input,textarea,select').forEach(function(el){ m.set(el, valOf(el)); });
+    N.baseline = m;
+  }
+  function valOf(el){
+    if (el.type === 'checkbox' || el.type === 'radio') return el.checked ? '1' : '0';
+    if (el.type === 'file') return (el.files && el.files.length) ? 'f'+el.files.length : '';
+    if (el.tagName === 'SELECT') return String(el.selectedIndex);
+    return el.value;
+  }
+  function modalDirty(){
+    var b = document.getElementById('modalB'); if (!b || !N.baseline) return false;
+    var els = b.querySelectorAll('input,textarea,select');
+    for (var i=0;i<els.length;i++){
+      var el = els[i];
+      if (el.type === 'hidden' || el.readOnly || el.disabled) continue;
+      if (el.closest('.nk-ts')) continue;                       // search box ko kura form hoina
+      if (!N.baseline.has(el)) continue;                         // pachhi aafai thapieko field
+      if (N.baseline.get(el) !== valOf(el)) return true;
+    }
+    return false;
+  }
+  var modalState = {};
+  function watchModals(){
+    MODAL_IDS.forEach(function(id){
+      var m = document.getElementById(id); if (!m) return;
+      modalState[id] = m.classList.contains('open');
+      new MutationObserver(function(){
+        var now = m.classList.contains('open');
+        if (now === modalState[id]) return;
+        modalState[id] = now;
+        if (!N.ready || !appShown()) return;
+        if (now){
+          if (!N.restoring) history.pushState({nk:'modal', sid:SID, id:id, k:curKey()}, '');
+          if (id === 'modal') setTimeout(takeBaseline, 350);       // form bhariisakepachhi ko value
+        } else if (!N.fromPop){
+          // Save / ✕ bata banda — history ko modal kadam lai page ma badalne
+          var s = st();
+          if (s && s.nk === 'modal' && !anyModalOpen()) history.replaceState(pageState({dup:true}), '');
+        }
+      }).observe(m, {attributes:true, attributeFilter:['class']});
+    });
+    // Form bhitra naya content (arko form) aayo bhane baseline feri
+    var mb = document.getElementById('modalB');
+    if (mb) new MutationObserver(function(muts){
+      for (var i=0;i<muts.length;i++){ if (muts[i].target === mb){ setTimeout(takeBaseline, 350); return; } }
+    }).observe(mb, {childList:true});
+  }
+  function closeTopModal(){
+    var ids = openModalIds(); var id = ids[ids.length-1];
+    N.fromPop++;
+    try{
+      if (id === 'modal'){
+        if (document.getElementById('selfie_video') && typeof cancelSelfieCapture === 'function') cancelSelfieCapture();
+        else closeModal();
+      } else if (id === 'connModal' && typeof closeConnModal === 'function') closeConnModal();
+      else { var m = document.getElementById(id); if (m) m.classList.remove('open'); }
+    } finally { setTimeout(function(){ N.fromPop = Math.max(0, N.fromPop-1); }, 0); }
+  }
+
+  /* ---------- "Thap" menu + dropdown search ---------- */
+  function overlayOpened(kind){
+    if (!N.ready || N.restoring || !appShown()) return;
+    history.pushState({nk:kind, sid:SID, k:curKey()}, '');
+  }
+  function overlayClosed(kind){
+    var s = st();
+    if (!s || s.nk !== kind) return;
+    if (anyModalOpen()){
+      // dropdown form mathi thiyo → modal kadam nai farkaune
+      history.replaceState({nk:'modal', sid:SID, k:curKey(), dupOf:'pick'}, '');
+    } else history.replaceState(pageState({dup:true}), '');
+  }
+
+  /* ---------- Back thichyo ---------- */
+  var lastExitToast = 0;
+  function onPop(e){
+    if (!N.ready || !appShown()) return;
+    var s = (e.state && e.state.sid === SID) ? e.state : null;
+    // Password badalnai parne screen — back le chhodna mildaina
+    if (document.getElementById('force_pw_ov')){ history.pushState(pageState(), ''); return; }
+    // 1) Dropdown search
+    if (window.__nkPicker && window.__nkPicker.isOpen()){ window.__nkPicker.closeFromBack(); return; }
+    // 2) Form / list (modal)
+    if (anyModalOpen()){
+      var top = openModalIds().pop();
+      if (top === 'modal' && modalDirty()){
+        var ok = true;
+        try{ ok = confirm('Form ma bhareko kura save bhaeko chhaina.\n\nOK = banda garne (harauncha)\nCancel = form mai basne'); }catch(x){}
+        if (!ok){ history.pushState({nk:'modal', sid:SID, id:top, k:curKey()}, ''); return; }
+      }
+      closeTopModal();
+      return;
+    }
+    // 3) "Thap" (More) menu
+    try{
+      if (MORE_OPEN){ MORE_OPEN = false; var nm = document.getElementById('navMore'); if (nm) nm.classList.remove('open'); return; }
+    }catch(x){}
+    // 4) Sidebar / mobile menu-search ko result list
+    var sr = document.querySelector('.sb-search-results[style*="block"]');
+    if (sr){ sr.style.display = 'none'; var si = document.activeElement; if (si && si.blur) si.blur(); }
+    // 5) App ko suru (Home) — pahilo choti sandesh, feri thichda banda
+    if (!s){ history.back(); return; }                       // purano session ko kadam — nakaharne
+    if (s.nk === 'exit'){
+      // Home bahek arko page ma bhae pahile Home (suru ko page) ma farkaune
+      if (s.root && s.root.k !== curKey()){
+        restore(s.root, true);
+        history.pushState(pageState(), '');
+        return;
+      }
+      var now = Date.now();
+      if (now - lastExitToast > 2500){
+        lastExitToast = now;
+        try{ showToast('⬅ Feri Back thichda app banda huncha', 'ok'); }catch(x){}
+      }
+      return;
+    }
+    if (s.nk === 'modal' || s.nk === 'more' || s.nk === 'pick'){ history.back(); return; }   // banda bhaisakeko kadam
+    if (s.k === curKey()){ history.back(); return; }          // eutai page — arko kadam pachhi
+    restore(s);
+  }
+  function restore(s, keepEntry){
+    N.restoring = true;
+    try{
+      var now = snap();
+      Object.keys(now).forEach(function(k){ if (!(k in s.v)){ try{ delete window[k]; }catch(x){ window[k] = undefined; } } });
+      Object.keys(s.v).forEach(function(k){ window[k] = s.v[k]; });
+      gotoPage(s.page);
+    } catch(err){ if (window.console) console.warn('back restore', err); }
+    finally { N.restoring = false; }
+    if (!keepEntry){ var ns = pageState(); ns.y = s.y || 0; history.replaceState(ns, ''); }
+    if (s.y) setTimeout(function(){ try{ window.scrollTo(0, s.y); }catch(x){} }, 80);
+  }
+
+  /* ---------- app ka function sanga jodne ---------- */
+  function wrap(name, after, before){
+    var orig = window[name]; if (typeof orig !== 'function') return;
+    window[name] = function(){
+      if (before) try{ before.apply(this, arguments); }catch(x){}
+      var r = orig.apply(this, arguments);
+      if (after) try{ after.apply(this, arguments); }catch(x){}
+      return r;
+    };
+  }
+  function start(){
+    wrap('renderPage', function(){ record(); });
+    wrap('gotoPage', null, function(){ N.preY = window.scrollY || 0; });
+    wrap('refreshCurrentPage', null, function(){ N.preY = window.scrollY || 0; });
+    wrap('toggleMore', function(){ try{ if (MORE_OPEN) overlayOpened('more'); else overlayClosed('more'); }catch(x){} });
+    wrap('enterApp', function(){ setRoot(); }, function(){ N.ready = false; });
+    wrap('doLogout', function(){ N.ready = false; });
+    watchModals();
+    window.addEventListener('popstate', onPop);
+    if (appShown()) setRoot();               // session bata sidhai app khuleko
+  }
+  function setRoot(){
+    var root = pageState();
+    history.replaceState({nk:'exit', sid:SID, root:root}, '');
+    history.pushState(root, '');
+    N.ready = true;
+  }
+
+  window.__nkNav = {overlayOpened:overlayOpened, overlayClosed:overlayClosed, _state:function(){ return {ready:N.ready, state:history.state, len:history.length}; }};
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
 })();
