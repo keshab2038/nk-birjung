@@ -2760,14 +2760,68 @@ function refreshBsDays(id){
   let opts = '';
   for(let i=1;i<=dim;i++) opts += `<option value="${i}" ${i===Math.min(cur,dim)?'selected':''}>${i}</option>`;
   dSel.innerHTML = opts;
-  document.getElementById(id+'_disp').textContent = bsLabelWithDay(y,m,+dSel.value);
+  refreshBsDayLabel(id);
 }
 function refreshBsDayLabel(id){
   const y = +document.getElementById(id+'_y').value;
   const m = +document.getElementById(id+'_m').value;
   const d = +document.getElementById(id+'_d').value;
-  document.getElementById(id+'_disp').textContent = bsLabelWithDay(y,m,d);
+  const disp = document.getElementById(id+'_disp');
+  disp.textContent = bsLabelWithDay(y,m,d);
+  // Kaam bhaeko din (entry) ko miti bhabishya ma pare turuntai rato chetawani
+  if (NK_ENTRY_PICKERS.has(id)){
+    const k = bsKey(y,m,d), mx = nkMaxEntryKey();
+    disp.style.color = k > mx ? 'var(--r,#dc2626)' : '';
+    disp.style.fontWeight = k > mx ? '800' : '';
+    if (k > mx) disp.textContent += '  ⛔ Bhabishya ko miti! (aaja ' + nkKeyLabel(mx) + ') — mahina/gate milaunu';
+  }
 }
+// ═══ BHABISHYA (FUTURE) MITI ROKNE ═══════════════════════════════════════
+// Kaam bhaeko din ko entry (landfill, trip, fuel, kharcha, daily work...) aaja
+// bhanda pachhi ko miti ma save hudaina. Bida, cheque, license, party payment
+// ra filter jasta thau ma bhabishya ko miti thik ho — tyaha rok chhaina.
+// "Aaja" = phone ko ghadi WA server ko pachhillo samay, jun pachhi cha —
+// phone ko ghadi ek din pachhi bhaye pani aaja ko entry rokidaina.
+const NK_ENTRY_PICKERS = new Set(['lf_date','t_date','f_date','e_date','dw_date','m_date','pu_date','kb_date','kbe_date','kk_date',
+  'st_date','c_date','dep_date','cmp_date','cb_date','ct_date','cd_date','cm_date']);
+const NK_NO_FUTURE_TABLES = new Set(['nk_landfill','nk_compost_intake','nk_kabad_bikri','nk_kabad_kharid','nk_trip','nk_extratip',
+  'nk_fuel','nk_daily_work','nk_hajiri','nk_attendance_log','nk_attendance_breaks','nk_maintenance','nk_store_txn','nk_collector',
+  'nk_expense','nk_petty_cash','nk_purchase']);
+function nkMaxEntryKey(){
+  const t = todayBS(); let k = bsKey(t.y,t.m,t.d);
+  try{
+    const st = Object.values(window._pullSrvTime||{}).filter(Boolean).sort().pop();
+    if (st){ const b = adToBs(new Date(st)); const sk = bsKey(b.y,b.m,b.d); if (sk > k) k = sk; }
+  }catch(e){}
+  return k;
+}
+function nkKeyLabel(k){ try{ const p = parseBsKey(k); return bsLabel(p.y,p.m,p.d); }catch(e){ return k; } }
+let _nkFutToastAt = 0;
+function _nkFutureToast(k){
+  if (Date.now() - _nkFutToastAt < 2500) return;
+  _nkFutToastAt = Date.now();
+  showToast('⛔ ' + nkKeyLabel(k) + ' bhabishya ko miti ho — aaja ' + nkKeyLabel(nkMaxEntryKey()) + '. Mahina ra gate milayera feri save garnu.', 'err');
+}
+function _nkFutureErr(k){ _nkFutureToast(k); const e = new Error('NK_FUTURE_DATE ' + k); e.code = 'NK_FUTURE'; return e; }
+// Form ko save ma: miti thik bhae tyahi farkaucha, bhabishya bhae save nai rokcha (form khulai rahancha)
+function nkNoFuture(k){
+  if (typeof k === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(k) && k > nkMaxEntryKey()) throw _nkFutureErr(k);
+  return k;
+}
+// dbInsert/dbUpdate ko antim suraksha (import, arko bato bata aaeko row)
+function nkFutureKeyOf(table, row){
+  if (!NK_NO_FUTURE_TABLES.has(table) || !row) return null;
+  if (table === 'nk_hajiri' && String(row.status||'') === 'L') return null;      // swikrit bida — aaghi ko din ko L thik
+  const mx = nkMaxEntryKey();
+  for (const f of ['date_bs','purchase_date_bs']){
+    const v = row[f];
+    if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && v > mx) return v;
+  }
+  return null;
+}
+// Bhabishya miti le save rokda console/error popup ma aawaj nagarne
+window.addEventListener('unhandledrejection', e=>{ if (e.reason && e.reason.code === 'NK_FUTURE') e.preventDefault(); });
+window.addEventListener('error', e=>{ if (e.error && e.error.code === 'NK_FUTURE') e.preventDefault(); });
 function getBsPickerValue(id){
   const y = +document.getElementById(id+'_y').value;
   const m = +document.getElementById(id+'_m').value;
@@ -3169,6 +3223,7 @@ function _isDuplicateErr(e){
 }
 async function dbInsert(table, row){
   _viewGuard(table);
+  { const fk = nkFutureKeyOf(table, row); if (fk) throw _nkFutureErr(fk); }
   _sanitizeUuidRow(row);
   if (!row.id) row.id = uid();
   if (!row.created_at) row.created_at = new Date().toISOString();
@@ -3214,6 +3269,11 @@ async function dbInsert(table, row){
 }
 async function dbUpdate(table, id, patch){
   _viewGuard(table);
+  if (patch && (patch.date_bs !== undefined || patch.purchase_date_bs !== undefined || patch.status !== undefined)){
+    const old = (DB.data[table]||[]).find(r=>r.id===id) || {};
+    const fk = nkFutureKeyOf(table, {...old, ...patch});
+    if (fk && (patch.date_bs !== undefined || patch.purchase_date_bs !== undefined)) throw _nkFutureErr(fk);
+  }
   _sanitizeUuidRow(patch);
   _sanitizeUuidRow(patch);
   DB.data[table] = (DB.data[table]||[]).map(r=> r.id===id ? {...r,...patch} : r);
@@ -3496,7 +3556,7 @@ const PULL_SOURCE = { 'nk_purchase': 'nk_purchase_lite', 'nk_users': 'nk_users_l
 // Samasya: kunai device ma app ghanta-ghanta kholirakhda PURANO build nai
 // chalirahanthyo — naya feature (jastai Petrol, rate Edit button) dekhinnathyo.
 // Ab app le server ko index.html ko version herera "naya version aayo" bhancha.
-const APP_BUILD = '20261105-1900';
+const APP_BUILD = '20261117-1800';
 // Party lai gareko bhuktani (aanshik/peski) — bill sanga sidhai najodine rakam
 if (typeof TABLES !== 'undefined' && !TABLES.includes('nk_party_payment')) TABLES.push('nk_party_payment');
 if (typeof TABLES !== 'undefined' && !TABLES.includes('nk_bank_recon')) TABLES.push('nk_bank_recon');
@@ -5939,7 +5999,7 @@ async function saveFuel(id){
   const row = {
     vehicle, driver: document.getElementById('f_driver').value,
     vtype: liveRows('nk_vehicles').find(v=>v.num===vehicle)?.vtype || '',
-    date_bs: getBsPickerValue('f_date'),
+    date_bs: nkNoFuture(getBsPickerValue('f_date')),
     liter, rate, total: liter*rate,
     fuel_type: document.getElementById('f_fuel_type')?.value || 'Diesel',
     km_start, km_end, kms,
@@ -6370,7 +6430,7 @@ async function _saveTripInner(id){
   const row = {
     vehicle, driver: document.getElementById('t_driver').value,
     vtype: liveRows('nk_vehicles').find(v=>v.num===vehicle)?.vtype || '',
-    date_bs: getBsPickerValue('t_date'),
+    date_bs: nkNoFuture(getBsPickerValue('t_date')),
     ward: document.getElementById('t_ward').value,
     tole: document.getElementById('t_tole').value,
     trip_count: isEq ? 1 : (+document.getElementById('t_count').value || 1),
@@ -6495,7 +6555,7 @@ async function saveExtraTip(id){
   const status = paid<=0 ? 'Due' : (paid<amount ? 'Partial' : 'Paid');
   const row = {
     vehicle, driver: document.getElementById('e_driver').value,
-    date_bs: getBsPickerValue('e_date'),
+    date_bs: nkNoFuture(getBsPickerValue('e_date')),
     ward: document.getElementById('e_ward').value,
     tole: document.getElementById('e_tole').value,
     waste_type: document.getElementById('e_wtype').value,
@@ -6651,7 +6711,7 @@ function openMarkDepositForm(id){
 }
 async function markCollectorDeposited(id){
   await dbUpdate('nk_collector', id, {
-    deposit_status: 'Jama Bhayo', deposit_date_bs: getBsPickerValue('dep_date'),
+    deposit_status: 'Jama Bhayo', deposit_date_bs: nkNoFuture(getBsPickerValue('dep_date')),
     deposit_marked_by: CURRENT_USER?.username||''
   });
   showToast(t('col_depositMarked'),'ok');
@@ -6773,7 +6833,7 @@ async function saveCollector(id){
     if (!confirm(t('col_splitMismatchConfirm'))) return;
   }
   const toPassbook = document.getElementById('c_passbook').checked;
-  const date_bs = getBsPickerValue('c_date');
+  const date_bs = nkNoFuture(getBsPickerValue('c_date'));
   const deposit_status = document.getElementById('c_depositstatus').value;
   const row = {
     collector_name, date_bs, ward: document.getElementById('c_ward').value,
@@ -7903,7 +7963,7 @@ async function saveStoreTxn(itemName, type){
   if (qty<=0){ showToast(t('store_qtyRequired'),'err'); return; }
   const rate = +document.getElementById('st_rate').value || 0;
   const amount = qty*rate;
-  const date_bs = getBsPickerValue('st_date');
+  const date_bs = nkNoFuture(getBsPickerValue('st_date'));
   const toPassbook = document.getElementById('st_passbook').checked;
   const row = {
     item_name:itemName, txn_type:type, qty, date_bs,
@@ -12828,7 +12888,7 @@ async function saveMaintenance(id){
   const cost = +document.getElementById('m_cost').value||0;
   const vehicle = document.getElementById('m_vehicle').value;
   const issue = document.getElementById('m_issue').value;
-  const date_bs = getBsPickerValue('m_date');
+  const date_bs = nkNoFuture(getBsPickerValue('m_date'));
   const isVat = document.getElementById('m_billtype').value==='VAT';
   const tdsOn = document.getElementById('m_tds').checked;
   const tdsPct = tdsOn ? (+document.getElementById('m_tds_pct').value||0) : 0;
@@ -14212,7 +14272,7 @@ async function saveDailyWork(id){
     // CRASH FIX: 'dw_date' element nai bandaina (picker _y/_m/_d select
     // banaucha) — yehi null.value le SAVE NAI HUDAINATHYO (photo sahit
     // kaam chupchap haraune). Aba sahi helper:
-    date_bs: bsPickerKey('dw_date'),
+    date_bs: nkNoFuture(bsPickerKey('dw_date')),
     ward: document.getElementById('dw_ward').value,
     thau,
     supervisor: document.getElementById('dw_sup').value,
@@ -14952,7 +15012,7 @@ async function savePurchase(id){
     bill_no: document.getElementById('pu_billno').value.trim(),
     party_id: partySel.value || null, // '' UUID error dincha — khali bhaye null
     party_name: opt.dataset.name,
-    purchase_date_bs: getBsPickerValue('pu_date'),
+    purchase_date_bs: nkNoFuture(getBsPickerValue('pu_date')),
     items: document.getElementById('pu_items').value.trim(),
     amount,
     bill_type: _locked ? (_rec0.bill_type||'PAN') : (document.getElementById('pu_billtype').value || 'PAN'),
@@ -16629,7 +16689,7 @@ function openCompostIntakeForm(id){
 async function saveCompostIntake(id){
   const kg = +document.getElementById('cmp_kg').value || 0;
   if (kg<=0){ showToast('KG halnu','err'); return; }
-  const row = {date_bs: bsPickerKey('cmp_date'), kg, source: document.getElementById('cmp_src').value.trim(), note: document.getElementById('cmp_note').value.trim()};
+  const row = {date_bs: nkNoFuture(bsPickerKey('cmp_date')), kg, source: document.getElementById('cmp_src').value.trim(), note: document.getElementById('cmp_note').value.trim()};
   if (!id) row.entered_by = CURRENT_USER?.username||'';
   if (id) await dbUpdate('nk_compost_intake', id, row); else await dbInsert('nk_compost_intake', row);
   closeModal(); showToast('✅ '+fmtKg(kg)+' kg organic save bhayo','ok'); refreshCurrentPage();
@@ -16708,7 +16768,7 @@ function openCompostBatchForm(id){
   openModal(id?'✏ Batch Edit':'➕ Naya Thupro', body);
 }
 async function saveCompostBatch(id){
-  const row = {batch_no: document.getElementById('cb_no').value.trim(), start_date_bs: bsPickerKey('cb_date'), qty_kg: +document.getElementById('cb_kg').value||0, note: document.getElementById('cb_note').value.trim()};
+  const row = {batch_no: document.getElementById('cb_no').value.trim(), start_date_bs: nkNoFuture(bsPickerKey('cb_date')), qty_kg: +document.getElementById('cb_kg').value||0, note: document.getElementById('cb_note').value.trim()};
   if (!row.batch_no){ showToast('Batch no. halnu','err'); return; }
   if (liveRows('nk_compost_batch').some(b=>b.id!==id && String(b.batch_no||'').trim().toLowerCase()===row.batch_no.toLowerCase())){ showToast(`"${row.batch_no}" batch pahile nai cha`,'err'); return; }
   if (id){
@@ -16749,7 +16809,7 @@ async function saveCompostTurn(id, idx){
   const b = liveRows('nk_compost_batch').find(r=>r.id===id); if (!b) return;
   const tv = document.getElementById('ct_temp').value.trim();
   if (tv && (isNaN(+tv) || +tv<0 || +tv>100)){ showToast('Tapkram 0–100°C bhitra halnu','err'); return; }
-  const entry = {date_bs: bsPickerKey('ct_date'), temp: tv===''?null:+tv, note: document.getElementById('ct_note').value.trim()};
+  const entry = {date_bs: nkNoFuture(bsPickerKey('ct_date')), temp: tv===''?null:+tv, note: document.getElementById('ct_note').value.trim()};
   if (entry.date_bs < String(b.start_date_bs||'')){ showToast('Paltaai miti batch suru bhanda aghi huna sakdaina','err'); return; }
   const turns = Array.isArray(b.turns)?[...b.turns]:[];
   if (idx!=null && turns[idx]) turns[idx] = {...turns[idx], ...entry, edited_by: CURRENT_USER?.username||''};
@@ -16781,7 +16841,7 @@ function openCompostMatureForm(id){
 }
 async function saveCompostMature(id){
   const b = liveRows('nk_compost_batch').find(r=>r.id===id); if (!b) return;
-  const d = bsPickerKey('cm_date');
+  const d = nkNoFuture(bsPickerKey('cm_date'));
   if (d < String(b.start_date_bs||'')){ showToast('Pakeko miti suru bhanda aghi huna sakdaina','err'); return; }
   const age = _bsDiffDays(b.start_date_bs, d);
   if (age < 56 && !confirm(`Yo batch ${age} din matra bhayo (pakna ~56 din lagcha). Pakyo nai mark garne?`)) return;
@@ -16813,7 +16873,7 @@ async function saveCompostDispatch(id){
   const kg = +document.getElementById('cd_kg').value || 0;
   if (kg<=0){ showToast('Kati kg niskyo halnu','err'); return; }
   if (b.qty_kg && kg > +b.qty_kg && !confirm(`Niskeko ${fmtKg(kg)} kg organic parimaan ${fmtKg(b.qty_kg)} kg bhanda badhi cha. Thik ho?`)) return;
-  await dbUpdate('nk_compost_batch', id, {status:'Dispatched', dispatched_kg: kg, dispatched_date_bs: bsPickerKey('cd_date'), dispatch_note: document.getElementById('cd_note').value.trim(), matured_date_bs: b.matured_date_bs || bsPickerKey('cd_date')});
+  await dbUpdate('nk_compost_batch', id, {status:'Dispatched', dispatched_kg: kg, dispatched_date_bs: nkNoFuture(bsPickerKey('cd_date')), dispatch_note: document.getElementById('cd_note').value.trim(), matured_date_bs: b.matured_date_bs || bsPickerKey('cd_date')});
   closeModal(); showToast('📦 Niskyo save bhayo','ok'); refreshCurrentPage();
 }
 async function saveCompostUndispatch(id){
@@ -17363,6 +17423,7 @@ window.lfVehicleChanged = function(){}; window.lfCalcWaste = function(){};
 async function saveLandfill(next){
   const sh = window._lfSheet; if (!sh || window._lfSaving) return;
   const date_bs = bsPickerKey('lf_date');
+  if (nkFutureKeyOf('nk_landfill', {date_bs})){ _nkFutureToast(date_bs); return; }
   // input ma type gareko (Enter/onchange nachaleko bhaye pani) padhne
   for (let i=0;i<sh.rows.length;i++){
     const r = sh.rows[i];
@@ -17944,7 +18005,7 @@ function recalcKabadBikriGrandTotal(){
   });
 }
 async function saveKabadBikri(){
-  const date_bs = getBsPickerValue('kb_date');
+  const date_bs = nkNoFuture(getBsPickerValue('kb_date'));
   const party = document.getElementById('kb_party').value.trim();
   const note = document.getElementById('kb_note').value;
   const validRows = _kabadBikriItemRows.filter(r => r.item && (+r.qty||0) > 0);
@@ -18034,7 +18095,7 @@ async function saveKabadBikriEdit(id){
   const total = Math.round(qty*rate*100)/100;
   const item_name = document.getElementById('kbe_item').value;
   await dbUpdate('nk_kabad_bikri', id, {
-    date_bs: getBsPickerValue('kbe_date'),
+    date_bs: nkNoFuture(getBsPickerValue('kbe_date')),
     item_name, source: 'Dumping',
     unit: liveRows('nk_kabad_rate').find(x=>x.item_name===item_name)?.unit || (liveRows('nk_kabad_bikri').find(x=>x.id===id)?.unit) || 'kg',
     quantity: qty, rate: rate, total_amount: total,
@@ -18098,7 +18159,7 @@ async function saveKabadKharid(id){
   const rate = +document.getElementById('kk_rate').value||0;
   if (qty<=0){ showToast('Qty halnu','err'); return; }
   const row = {
-    date_bs: getBsPickerValue('kk_date'),
+    date_bs: nkNoFuture(getBsPickerValue('kk_date')),
     item_name: document.getElementById('kk_item').value,
     quantity: qty, rate: rate, total_amount: qty*rate, unit:'kg',
     party: document.getElementById('kk_party').value,
