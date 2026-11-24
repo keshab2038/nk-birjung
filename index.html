@@ -3033,9 +3033,17 @@ async function attLoadPhotos(rec){
   }catch(e){ showToast('Photo tanna sakiena','err'); }
   return rec;
 }
+// Kaam Talika: server ma pugisakeko ('h' bhaeko) photo ko base64 local cache ma narakhne
+// (memory ma rakhera) — server ma napugeko (h nabhaeko) chai offline ko lagi rakhne
+function _dwStripRow(r){
+  const fx = a => Array.isArray(a) && a.some(x=>x && x.p && x.h) ? a.map(x=>{ if (!(x && x.p && x.h)) return x; try{ _dwPhPut(x.h, x.p); }catch(e){} const y = {...x}; delete y.p; return y; }) : a;
+  const s = fx(r.start_photos), e = fx(r.end_photos);
+  return (s===r.start_photos && e===r.end_photos) ? r : {...r, start_photos:s, end_photos:e};
+}
 function _saveLocalNow(t){
   let rows = DB.data[t]||[];
   if (t==='nk_purchase') rows = rows.map(r=> r.photo ? {...r, photo: undefined, has_photo: true} : r);
+  else if (t==='nk_daily_work') rows = rows.map(_dwStripRow);
   else if (t==='nk_attendance_log') rows = rows.map(r=>{ if (!_ATT_PHOTO_COLS.some(c=>r[c])) return r; const x = {...r}; _ATT_PHOTO_COLS.forEach(c=>{ if (x[c]) x[c] = undefined; }); return x; });
   if (t==='nk_gps_track') return;   // GPS (9000+ row) local cache ma narakhne — sadhai server bata
   if (_idbOk){
@@ -3393,7 +3401,7 @@ async function setSetting(key, value){
     );
     saveLocal('nk_settings');
     // Only sync to Supabase for important settings (geofence, language, approver config)
-    if (['geofence_config','app_language','attendance_approver_config','fuel_rates','vehicle_type_config','shift_config'].includes(key)){
+    if (['geofence_config','app_language','attendance_approver_config','fuel_rates','vehicle_type_config','shift_config','dw_kaam_types'].includes(key)){
       try{
         if (ONLINE_MODE && navigator.onLine && sb){
           // id device-device farak huna sakcha — setting_key le upsert
@@ -3409,7 +3417,7 @@ async function setSetting(key, value){
     DB.data['nk_settings'].push(newRow);
     saveLocal('nk_settings');
     // Only insert to Supabase for important settings
-    if (['geofence_config','app_language','attendance_approver_config','fuel_rates','vehicle_type_config','shift_config'].includes(key)){
+    if (['geofence_config','app_language','attendance_approver_config','fuel_rates','vehicle_type_config','shift_config','dw_kaam_types'].includes(key)){
       try{
         if (ONLINE_MODE && navigator.onLine && sb){
           const sendRow = {...newRow}; delete sendRow.id;
@@ -3556,7 +3564,7 @@ const PULL_SOURCE = { 'nk_purchase': 'nk_purchase_lite', 'nk_users': 'nk_users_l
 // Samasya: kunai device ma app ghanta-ghanta kholirakhda PURANO build nai
 // chalirahanthyo — naya feature (jastai Petrol, rate Edit button) dekhinnathyo.
 // Ab app le server ko index.html ko version herera "naya version aayo" bhancha.
-const APP_BUILD = '20261124-1200';
+const APP_BUILD = '20261124-1800';
 // Party lai gareko bhuktani (aanshik/peski) — bill sanga sidhai najodine rakam
 if (typeof TABLES !== 'undefined' && !TABLES.includes('nk_party_payment')) TABLES.push('nk_party_payment');
 if (typeof TABLES !== 'undefined' && !TABLES.includes('nk_bank_recon')) TABLES.push('nk_bank_recon');
@@ -5183,7 +5191,8 @@ function _renderPageCore(id){
     case 'roadmaster':
       main.innerHTML = pageRoadMaster(); fab.style.display='flex'; fab.onclick=()=>openRoadForm(); break;
     case 'workorder': case 'dailywork':
-      main.innerHTML = pageDailyWork(); fab.style.display = (window._dwView||'list')==='list' ? 'flex' : 'none'; fab.onclick=()=>openDailyWorkForm(); break;
+      main.innerHTML = pageDailyWork(); fab.style.display = (window._dwView||'list')==='list' ? 'flex' : 'none'; fab.onclick=()=>openDailyWorkForm();
+      setTimeout(()=>{ try{ dwHydratePhotos(main); }catch(e){} }, 0); break;
     case 'kabad': main.innerHTML = pageKabad(); fab.style.display='flex'; fab.onclick=()=>{
         const v = window._kabadView||'bikri';
         if (v==='rates') openKabadRateForm(); else openKabadBikriForm();
@@ -5581,6 +5590,7 @@ function pageDashboard(){
     <div style="font-size:18px;font-weight:800;margin-bottom:2px">${bsLabelWithDay(today2.y,today2.m,today2.d)}</div>
     <div style="font-size:12px;opacity:.7">${CURRENT_USER ? 'Welcome, '+escHtml(CURRENT_USER.full_name||CURRENT_USER.username) : ''}</div>
   </div>
+  ${moduleEnabled('dailywork') ? dwReminderBanner() : ''}
 
 
   <div class="kpi-grid">
@@ -14191,7 +14201,10 @@ async function dwAddPhotoFiles(files){
       }catch(e){ res(null); }
     });
     if (p){
-      const item = {p, lat:null, lng:null, t:new Date().toTimeString().slice(0,5), by:CURRENT_USER?.full_name||CURRENT_USER?.username||''};
+      // ♻️ Eutai photo dohoryaera (arko kaam ma wa yahi kaam ma) halna namilne
+      const h = await dwHash(p);
+      if (h && dwKnownHashes().has(h)){ showToast(L('♻️ Yo photo pahile nai halisakeko chha — naya photo khichnu','♻️ ई फोटो पहिले से डालल बा — नया फोटो खींचीं'),'err'); continue; }
+      const item = {p, hl:h||undefined, lat:null, lng:null, t:new Date().toTimeString().slice(0,5), by:CURRENT_USER?.full_name||CURRENT_USER?.username||''};
       window._dwPhotos.push(item);
       added.push(item);
     } else {
@@ -14203,20 +14216,30 @@ async function dwAddPhotoFiles(files){
   // GPS PACHHADI: aayepachhi bharkharai thapiyeka photo haru ma jodine
   _withTimeout(captureGps(), 12000, {lat:null,lng:null,error:'timeout'}).then(gps=>{
     if (gps && gps.lat!=null){
-      added.forEach(it=>{ if (it.lat==null){ it.lat=gps.lat; it.lng=gps.lng; } });
+      added.forEach(it=>{ if (it.lat==null){ it.lat=gps.lat; it.lng=gps.lng; if (gps.accuracy!=null) it.acc=Math.round(gps.accuracy); } });
       dwRenderThumbs();
     }
   }).catch(()=>{});
+}
+// Save garnu aghi: GPS nabhaeka naya photo ma feri ek choti GPS liine (19% photo ma GPS chhutthyo)
+async function dwFillMissingGps(){
+  const miss = (window._dwPhotos||[]).filter(it=>it.p && it.lat==null);
+  if (!miss.length) return;
+  showToast(L('📍 GPS liudai... (kehi second)','📍 GPS लेत बानी... (कुछ सेकेंड)'),'ok');
+  const gps = await _withTimeout(captureGps(), 9000, {lat:null,lng:null});
+  if (gps && gps.lat!=null) miss.forEach(it=>{ it.lat=gps.lat; it.lng=gps.lng; if (gps.accuracy!=null) it.acc=Math.round(gps.accuracy); });
+  else showToast(L('⚠ GPS aaena — photo GPS bina save huncha (report ma dekhincha). Phone ko Location ON garnu','⚠ GPS ना आइल — फोटो GPS बिना सेभ होई (रिपोर्ट में देखाई)। फोन के Location ON करीं'),'err');
 }
 function dwRenderThumbs(){
   const el = document.getElementById('dw_thumbs');
   if (!el) return;
   el.innerHTML = window._dwPhotos.map((ph,i)=>`
     <div style="position:relative;display:inline-block;margin:3px">
-      <img src="${ph.p}" style="width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--s5)">
+      ${dwImgTag(ph, window._dwFormId||'', 'width:64px;height:64px;object-fit:cover;border-radius:8px;border:1px solid var(--s5)')}
       <span style="position:absolute;bottom:2px;left:3px;font-size:9px;background:rgba(0,0,0,.55);color:#fff;padding:0 3px;border-radius:4px">${ph.lat!=null?'📍':'∅'}</span>
       ${i >= (window._dwLocked||0) ? `<button onclick="window._dwPhotos.splice(${i},1);dwRenderThumbs()" style="position:absolute;top:-6px;right:-6px;background:var(--r);color:#fff;border:none;border-radius:50%;width:18px;height:18px;font-size:11px;line-height:1">✕</button>` : `<span title="${L('Save bhaisakeko — praman, hatauna mildaina','सेभ हो गइल — सबूत ह, हटावल ना जा सकेला')}" style="position:absolute;top:-6px;right:-6px;font-size:11px">🔒</span>`}
     </div>`).join('') + `<div class="hint" style="margin-top:4px">${window._dwPhotos.length} ${L('photo (asimit)','फोटो (जेतना चाहीं)')}${(window._dwLocked||0)>0?` · 🔒 ${window._dwLocked} ${L('save bhaisakeko (praman — hataउन mildaina)','सेभ भइल (सबूत — हटावल ना जा सकेला)')}`:''}</div>`;
+  dwHydratePhotos(el);
 }
 // phase: 'start' = kaam SURU ko photo, 'end' = kaam SAKIYEKO photo
 function dwPhotoInputHtml(phase){
@@ -14236,7 +14259,9 @@ function openDailyWorkForm(id){
   const rec = id ? liveRows('nk_daily_work').find(r=>r.id===id) : null;
   window._dwPhotos = rec ? [...(rec.start_photos||[])] : [];
   window._dwLocked = window._dwPhotos.length;   // save bhaisakeko photo praman — hataउन namilne
+  window._dwFormId = id || '';
   const sups = dwSupervisors();
+  const kts = dwKaamTypes(), curKt = rec?.kaam_type || '';
   const mySup = rec?.supervisor || dwMySupervisor();
   const body = `
     <div class="field-row">
@@ -14245,7 +14270,14 @@ function openDailyWorkForm(id){
         <select id="dw_ward" onchange="dwWardChanged()">${Array.from({length:APP_CONFIG.WARDS},(_,i)=>i+1).map(w=>`<option ${String(rec?.ward||'')===String(w)?'selected':''}>${w}</option>`).join('')}</select>
       </div>
     </div>
-    <div class="field"><label>${L('Kun Thau/Road','कवन जगह/रोड')} <span class="hint">${L('(optional)','(जरूरी नइखे)')}</span></label>
+    <div class="field"><label>🧹 ${L('Kaam ko kisim','काम के किसिम')} <span style="color:var(--r)">*</span></label>
+      <select id="dw_kt">
+        <option value="">${L('— Kaam ko kisim chhannu —','— काम के किसिम चुनीं —')}</option>
+        ${kts.map(k=>`<option ${curKt===k?'selected':''}>${escHtml(k)}</option>`).join('')}
+        ${curKt && !kts.includes(curKt) ? `<option selected>${escHtml(curKt)}</option>` : ''}
+      </select>
+    </div>
+    <div class="field"><label>${L('Kun Thau/Road','कवन जगह/रोड')} <span style="color:var(--r)">*</span></label>
       <select id="dw_thau_sel" onchange="dwThauSelChanged()">${dwThauOptionsHtml(rec?.ward || '1', rec?.thau||'')}</select>
       <input id="dw_thau" value="${escHtml(rec?.thau||'')}" placeholder="${L('Arko thau ko naam lekhnu...','दोसर जगह के नाव लिखीं...')}" style="margin-top:6px;${dwThauIsCustom(rec?.ward||'1', rec?.thau||'')?'':'display:none'}">
     </div>
@@ -14270,10 +14302,18 @@ function openDailyWorkForm(id){
   dwRenderThumbs();
 }
 async function saveDailyWork(id){
-  // Thau/Road OPTIONAL (Road Master bata select, wa "Arko thau" lekhne)
+  // Thau/Road ra Kaam ko kisim ANIWARYA (report ma "thau nalekheko" 56% thiyo)
   const _ts = document.getElementById('dw_thau_sel');
   const thau = (_ts && _ts.value && _ts.value!=='__other') ? _ts.value : document.getElementById('dw_thau').value.trim();
+  const kt = (document.getElementById('dw_kt')?.value||'').trim();
+  if (!kt){ showToast(L('🧹 Kaam ko kisim chhannu','🧹 काम के किसिम चुनीं'),'err'); try{ document.getElementById('dw_kt').focus(); }catch(e){} return; }
+  if (!thau){
+    showToast(L('🛣 Thau/Road chhannu (list ma nabhae "✏ Arko thau" chhanera lekhnu)','🛣 जगह/रोड चुनीं (लिस्ट में ना होखे त "✏ दोसर जगह" चुन के लिखीं)'),'err');
+    try{ (_ts && _ts.value==='__other' ? document.getElementById('dw_thau') : _ts).focus(); }catch(e){} return;
+  }
   if (!window._dwPhotos.length && !id){ showToast(L('Kamtima 1 photo khichnu','कम से कम १ फोटो खींचीं'),'err'); return; }
+  if (window._dwSaving) return; window._dwSaving = true;
+  try{ await dwFillMissingGps(); } finally { window._dwSaving = false; }
   const row = {
     // CRASH FIX: 'dw_date' element nai bandaina (picker _y/_m/_d select
     // banaucha) — yehi null.value le SAVE NAI HUDAINATHYO (photo sahit
@@ -14281,6 +14321,7 @@ async function saveDailyWork(id){
     date_bs: nkNoFuture(bsPickerKey('dw_date')),
     ward: document.getElementById('dw_ward').value,
     thau,
+    kaam_type: kt,
     supervisor: document.getElementById('dw_sup').value,
     note: document.getElementById('dw_note').value.trim(),
     start_photos: window._dwPhotos,
@@ -14300,8 +14341,9 @@ function openDailyWorkFinish(id){
   if (!rec) return;
   window._dwPhotos = [...(rec.end_photos||[])];
   window._dwLocked = window._dwPhotos.length;
+  window._dwFormId = id;
   const body = `
-    <p class="hint mb8"><b>${escHtml(rec.thau||'')}</b> (${L('Ward','वार्ड')} ${escHtml(String(rec.ward||''))}) · 🕐 ${escHtml(rec.start_time||'')} ${t('dw_startedAt')}</p>
+    <p class="hint mb8">${rec.kaam_type?`🧹 ${escHtml(rec.kaam_type)} · `:''}<b>${escHtml(rec.thau||'')}</b> (${L('Ward','वार्ड')} ${escHtml(String(rec.ward||''))}) · 🕐 ${escHtml(rec.start_time||'')} ${t('dw_startedAt')}</p>
     ${(rec.start_photos||[]).length ? `<div class="hint mb8">🟢 ${t('dw_startPhoto')}: ${(rec.start_photos||[]).length}</div>` : `<div class="hint mb8" style="color:var(--y)">⚠ ${t('dw_noStartPhoto')}</div>`}
     ${dwPhotoInputHtml('end')}
     <div class="field"><label>📝 ${L('Note (sakiyeko bare)','टिप्पणी (काम खतम के बारे में)')}</label><textarea id="dw_end_note" rows="2">${escHtml(rec.end_note||'')}</textarea></div>
@@ -14314,6 +14356,9 @@ function openDailyWorkFinish(id){
 }
 async function finishDailyWork(id){
   if (!window._dwPhotos.length){ showToast(L('Sakiyeko kamtima 1 photo khichnu','खतम भइला के कम से कम १ फोटो खींचीं'),'err'); return; }
+  if (!window._dwPhotos.some(x=>x.p)){ showToast(L('Sakiyeko NAYA photo khichnu','खतम के नया फोटो खींचीं'),'err'); return; }
+  if (window._dwSaving) return; window._dwSaving = true;
+  try{ await dwFillMissingGps(); } finally { window._dwSaving = false; }
   const _endT = new Date().toTimeString().slice(0,5);
   await dbUpdate('nk_daily_work', id, {
     end_photos: window._dwPhotos,
@@ -14330,7 +14375,7 @@ function dwThumbStrip(list, id, phase){
   const arr = (list||[]).slice(0,4);
   const more = (list||[]).length - arr.length;
   return `<div style="display:flex;gap:4px;margin-top:4px;cursor:pointer" onclick="dwViewPhotos('${id}','${phase}')">
-    ${arr.map(ph=>`<img src="${ph.p}" style="width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid var(--s5)">`).join('')}
+    ${arr.map(ph=>dwImgTag(ph, id, 'width:44px;height:44px;object-fit:cover;border-radius:6px;border:1px solid var(--s5);background:var(--s6)')).join('')}
     ${more>0?`<div style="width:44px;height:44px;border-radius:6px;background:var(--s6);display:flex;align-items:center;justify-content:center;font-size:12px">+${more}</div>`:''}
   </div>`;
 }
@@ -14348,6 +14393,7 @@ async function dwAddMorePhotos(id, phase){
   if (!rec) return;
   window._dwPhotos = [...((phase==='end'?rec.end_photos:rec.start_photos)||[])];
   window._dwLocked = window._dwPhotos.length;
+  window._dwFormId = id;
   const body = `${dwPhotoInputHtml(phase==='end'?'end':'start')}
     <div class="modal-acts">
       <button class="btn btn-primary" onclick="dwSaveMorePhotos('${id}','${phase}')">${L('💾 Save','💾 सेभ करीं')}</button>
@@ -14357,6 +14403,9 @@ async function dwAddMorePhotos(id, phase){
   dwRenderThumbs();
 }
 async function dwSaveMorePhotos(id, phase){
+  if (!window._dwPhotos.some((x,i)=>i>=(window._dwLocked||0))){ showToast(L('Naya photo khichnu','नया फोटो खींचीं'),'err'); return; }
+  if (window._dwSaving) return; window._dwSaving = true;
+  try{ await dwFillMissingGps(); } finally { window._dwSaving = false; }
   const patch = {}; patch[phase==='end'?'end_photos':'start_photos'] = window._dwPhotos;
   await dbUpdate('nk_daily_work', id, patch);
   window._dwPhotos = [];
@@ -14367,13 +14416,20 @@ function dwViewPhotos(id, phase){
   const rec = liveRows('nk_daily_work').find(r=>r.id===id);
   if (!rec) return;
   const list = (phase==='end'?rec.end_photos:rec.start_photos)||[];
+  const ctx = dwFlagCtx(), fl = dwFlags(rec, ctx);
+  const wm = ctx.wardMed[String(rec.ward||'')];
   const body = `
-    ${list.map(ph=>`<div class="mb8" style="text-align:center">
-      <img src="${ph.p}" style="max-width:100%;border-radius:10px">
-      <div class="hint">🕐 ${escHtml(ph.t||'')} · 👤 ${escHtml(ph.by||'')} ${ph.lat!=null?`· <a href="https://www.google.com/maps?q=${ph.lat},${ph.lng}" target="_blank" rel="noopener">📍 ${L('Map','नक्सा')}</a>`:L('· GPS chhaina','· GPS नइखे')}</div>
-    </div>`).join('') || emptyState(L('Photo chhaina','फोटो नइखे'))}
+    ${fl.list.length ? `<div class="mb8" style="display:flex;gap:4px;flex-wrap:wrap">${dwFlagBadges(fl)}</div>` : ''}
+    ${list.map(ph=>{
+      const _k = ph.h||ph.hl, dup = _k && (ctx.hashJobs.get(_k)||new Set()).size > 1;
+      const dw = (ph.lat!=null && wm) ? _dwDist(ph.lat, ph.lng, wm.lat, wm.lng) : null;
+      return `<div class="mb8" style="text-align:center">
+      ${dwImgTag(ph, id, 'max-width:100%;min-height:120px;border-radius:10px;background:var(--s6)')}
+      <div class="hint">🕐 ${escHtml(ph.t||'')} · 👤 ${escHtml(ph.by||'')} ${ph.lat!=null?`· <a href="https://www.google.com/maps?q=${ph.lat},${ph.lng}" target="_blank" rel="noopener">📍 ${L('Map','नक्सा')}</a>${ph.acc!=null?` ±${ph.acc}m`:''}${dw!=null?` · Ward ${escHtml(String(rec.ward||''))} ${L('bata','से')} ${_dwKm(dw)}`:''}`:`<span style="color:var(--r)">${L('· GPS chhaina','· GPS नइखे')}</span>`}${dup?` · <span style="color:var(--r);font-weight:700">♻️ ${L('Dohoriyeko photo','दोहरावल फोटो')}</span>`:''}</div>
+    </div>`; }).join('') || emptyState(L('Photo chhaina','फोटो नइखे'))}
     <div class="modal-acts"><button class="btn btn-outline" onclick="closeModal()">${t('close')||'Band'}</button></div>`;
   openModal((phase==='end'?L('✅ Sakiyeko','✅ खतम भइल'):L('📸 Kaam ko','📸 काम के'))+L(' Photo — ',' फोटो — ')+escHtml(rec.thau||''), body);
+  try{ dwHydratePhotos(document.getElementById('modalB') || document); }catch(e){}
 }
 async function deleteDailyWork(id){
   if (!isManagerRole(CURRENT_USER?.role)){ showToast(L('Admin/Manager le matra','खाली एडमिन/मैनेजर'),'err'); return; }
@@ -14381,6 +14437,270 @@ async function deleteDailyWork(id){
   await dbDelete('nk_daily_work', id);
   showToast(L('Trash ma gayo','ट्रैश में गइल'),'ok'); refreshCurrentPage();
 }
+// ═══ 📷 KAAM TALIKA PHOTO — MAAG ANUSAR (lazy) ═══════════════════════════
+// SAMASYA: 1600+ photo (41 MB base64) hareck sync ma SABAI phone ma aauthyo.
+// AB: sync ma photo ko bibaran matra {h, lat, lng, t, by, acc} aaucha; photo
+// chai screen ma dekhine bela matra server (nk_dw_photos) bata, 20-20 kaam ko
+// ekai choti, ra memory ma rakhine (feri tandaina). 'h' = photo ko sha256
+// (pahilo 16 akshar) — dohoriyeko/nakkali photo chinna.
+const DW_PH_PLACE = "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><rect width="40" height="40" fill="#e9edf2"/><text x="20" y="25" font-size="14" text-anchor="middle">📷</text></svg>');
+const _dwPhMem = new Map();
+function _dwPhPut(h, p){
+  if (!h || !p) return;
+  if (_dwPhMem.has(h)) _dwPhMem.delete(h);
+  _dwPhMem.set(h, p);
+  while (_dwPhMem.size > 500) _dwPhMem.delete(_dwPhMem.keys().next().value);
+}
+function dwPhSrc(ph){ return (ph && (ph.p || (ph.h && _dwPhMem.get(ph.h)))) || ''; }
+function dwImgTag(ph, id, style){
+  const s = dwPhSrc(ph);
+  return s ? `<img src="${s}" style="${style}" alt="">`
+           : `<img src="${DW_PH_PLACE}" data-dwh="${escHtml((ph&&ph.h)||'')}" data-dwid="${escHtml(id||'')}" style="${style}" alt="">`;
+}
+async function dwHash(p){
+  try{
+    if (!p || !(window.crypto && crypto.subtle)) return '';
+    const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(p));
+    return [...new Uint8Array(b)].slice(0,8).map(x=>x.toString(16).padStart(2,'0')).join('');
+  }catch(e){ return ''; }
+}
+// Pahile nai halieka sabai photo ko hash (yo form ko photo sahit)
+function dwKnownHashes(){
+  const s = new Set();
+  const add = x=>{ const k = x && (x.h||x.hl); if (k) s.add(k); };
+  liveRows('nk_daily_work').forEach(r=>{ [...(r.start_photos||[]), ...(r.end_photos||[])].forEach(add); });
+  (window._dwPhotos||[]).forEach(add);
+  return s;
+}
+let _dwPhQ = new Set(), _dwPhT = null, _dwPhIO = null;
+const _dwPhBusy = new Set();
+function _dwPhSet(img, s){ img.src = s; img.removeAttribute('data-dwh'); img.removeAttribute('data-dwid'); }
+function dwHydratePhotos(root){
+  let imgs;
+  try{ imgs = (root||document).querySelectorAll('img[data-dwh]'); }catch(e){ return; }
+  if (!imgs.length) return;
+  if (!_dwPhIO && 'IntersectionObserver' in window){
+    _dwPhIO = new IntersectionObserver(es=>{ es.forEach(e=>{ if (e.isIntersecting){ _dwPhIO.unobserve(e.target); _dwPhWant(e.target); } }); }, {rootMargin:'400px 0px'});
+  }
+  // pahilo 24 photo turuntai (pahilo screen), baki scroll garda dekhina lagda matra
+  let n = 0;
+  imgs.forEach(img=>{
+    const s = _dwPhMem.get(img.dataset.dwh);
+    if (s){ _dwPhSet(img, s); return; }
+    if (!_dwPhIO || n++ < 24) _dwPhWant(img); else _dwPhIO.observe(img);
+  });
+}
+function _dwPhWant(img){
+  const id = img.dataset.dwid;
+  if (!id || !img.isConnected) return;
+  _dwPhQ.add(id);
+  clearTimeout(_dwPhT); _dwPhT = setTimeout(_dwPhFlush, 60);
+}
+async function dwFetchPhotos(ids){
+  ids = [...new Set(ids)].filter(id=>/^[0-9a-f-]{36}$/i.test(id) && !_dwPhBusy.has(id));
+  if (!ids.length || !(ONLINE_MODE && navigator.onLine && sb)) return false;
+  const tok = getSessionToken(); if (!tok) return false;
+  let ok = true;
+  for (let i=0; i<ids.length; i+=20){
+    const chunk = ids.slice(i, i+20);
+    chunk.forEach(x=>_dwPhBusy.add(x));
+    try{
+      const {data, error} = await sb.rpc('nk_dw_photos', {p_token: tok, p_ids: chunk});
+      if (error) throw error;
+      if (data && data.ok) Object.values(data.rows||{}).forEach(o=>{ [...(o.s||[]), ...(o.e||[])].forEach(x=>_dwPhPut(x.h, x.p)); });
+      else ok = false;
+    }catch(e){ ok = false; }
+    finally{ chunk.forEach(x=>_dwPhBusy.delete(x)); }
+  }
+  return ok;
+}
+async function _dwPhFlush(){
+  const ids = [..._dwPhQ]; _dwPhQ.clear();
+  if (!ids.length) return;
+  await dwFetchPhotos(ids);
+  document.querySelectorAll('img[data-dwh]').forEach(img=>{ const s = _dwPhMem.get(img.dataset.dwh); if (s) _dwPhSet(img, s); });
+}
+window.addEventListener('online', ()=>{ setTimeout(()=>{ try{ dwHydratePhotos(document); }catch(e){} }, 1500); });
+
+// ═══ 🛡 PHOTO JAANCH (GPS + dohoriyeko photo) ═══════════════════════════
+// Birgunj ko data (1626 photo) herera niyam:
+//  • GPS chhaina — photo ma location nai chhaina
+//  • Ward bata tadha — tyo ward ka photo haru ko bich (median) bata 3 km bhanda
+//    tadha (ward ko 99% photo 1 km bhitra parchan); ward ma kam photo bhae
+//    shahar ko bich bata 20 km
+//  • Suru–sakiyo tadha — suru ra sakiyeko photo bich 1.5 km bhanda badhi
+//    (thik kaam ma 90% = 400 m bhitra)
+//  • ♻️ Dohoriyeko photo — ekai photo arko kaam ma pani (wa dui choti)
+const DW_CITY = {lat:27.0073, lng:84.8779};
+const DW_RULE = {wardKm:3, cityKm:20, seKm:1.5, wardMinN:6};
+function _dwDist(a1, o1, a2, o2){
+  const R = 6371000, r = Math.PI/180, dA = (a2-a1)*r, dO = (o2-o1)*r;
+  const x = Math.sin(dA/2)**2 + Math.cos(a1*r)*Math.cos(a2*r)*Math.sin(dO/2)**2;
+  return 2*R*Math.asin(Math.min(1, Math.sqrt(x)));
+}
+function _dwKm(m){ return m==null ? '—' : (m < 1000 ? Math.round(m)+' m' : (m/1000).toFixed(m<10000?1:0)+' km'); }
+function _dwMed(a){ const s=[...a].sort((x,y)=>x-y), n=s.length; return n ? (n%2 ? s[(n-1)/2] : (s[n/2-1]+s[n/2])/2) : null; }
+function _dwGeo(list){ return (list||[]).filter(x=>x && x.lat!=null && x.lng!=null && !isNaN(+x.lat) && !isNaN(+x.lng)); }
+function _dwCentroid(list){ const g=_dwGeo(list); if (!g.length) return null; return {lat:g.reduce((s,x)=>s+(+x.lat),0)/g.length, lng:g.reduce((s,x)=>s+(+x.lng),0)/g.length}; }
+let _dwCtxCache = {key:'', ctx:null};
+function dwFlagCtx(){
+  const rows = liveRows('nk_daily_work');
+  let mx = ''; rows.forEach(r=>{ const u = r.updated_at||r.created_at||''; if (u > mx) mx = u; });
+  const key = rows.length+'|'+mx+'|'+(window._dwLocalRev||0);
+  if (_dwCtxCache.key===key && _dwCtxCache.ctx) return _dwCtxCache.ctx;
+  const hashJobs = new Map(), wardPts = {};
+  rows.forEach(r=>{
+    const all = [...(r.start_photos||[]), ...(r.end_photos||[])];
+    all.forEach(x=>{ const k = x && (x.h||x.hl); if (k){ const s = hashJobs.get(k) || new Set(); s.add(r.id); hashJobs.set(k, s); } });
+    const w = String(r.ward||''); if (!w) return;
+    _dwGeo(all).forEach(x=>{ (wardPts[w] || (wardPts[w]={la:[],lo:[]})).la.push(+x.lat); wardPts[w].lo.push(+x.lng); });
+  });
+  const wardMed = {};
+  Object.keys(wardPts).forEach(w=>{ const o = wardPts[w]; if (o.la.length >= DW_RULE.wardMinN) wardMed[w] = {lat:_dwMed(o.la), lng:_dwMed(o.lo), n:o.la.length}; });
+  const ctx = {hashJobs, wardMed};
+  _dwCtxCache = {key, ctx};
+  return ctx;
+}
+const DW_FLAG_INFO = {
+  nogps:{ico:'📍', np:'GPS chhaina', bh:'GPS नइखे', cls:'badge-amber'},
+  far:  {ico:'🗺', np:'Ward bata tadha', bh:'वार्ड से दूर', cls:'badge-red'},
+  sefar:{ico:'↔', np:'Suru–sakiyo tadha', bh:'शुरू–खतम दूर', cls:'badge-amber'},
+  dup:  {ico:'♻️', np:'Dohoriyeko photo', bh:'दोहरावल फोटो', cls:'badge-red'}
+};
+function dwFlags(r, ctx){
+  ctx = ctx || dwFlagCtx();
+  const sp = r.start_photos||[], ep = r.end_photos||[], all = [...sp, ...ep];
+  const out = {list:[], nogps:0, far:0, farMax:null, se:null, dup:0};
+  if (!all.length) return out;
+  out.nogps = all.length - _dwGeo(all).length;
+  const wm = ctx.wardMed[String(r.ward||'')];
+  _dwGeo(all).forEach(x=>{
+    const d = wm ? _dwDist(+x.lat, +x.lng, wm.lat, wm.lng) : _dwDist(+x.lat, +x.lng, DW_CITY.lat, DW_CITY.lng);
+    const lim = (wm ? DW_RULE.wardKm : DW_RULE.cityKm) * 1000;
+    if (d > lim){ out.far++; if (out.farMax==null || d > out.farMax) out.farMax = d; }
+  });
+  const cs = _dwCentroid(sp), ce = _dwCentroid(ep);
+  if (cs && ce) out.se = _dwDist(cs.lat, cs.lng, ce.lat, ce.lng);
+  const seen = new Set();
+  all.forEach(x=>{ const k = x && (x.h||x.hl); if (!k) return; if (seen.has(k) || (ctx.hashJobs.get(k)||new Set()).size > 1) out.dup++; seen.add(k); });
+  if (out.nogps) out.list.push('nogps');
+  if (out.far) out.list.push('far');
+  if (out.se!=null && out.se > DW_RULE.seKm*1000) out.list.push('sefar');
+  if (out.dup) out.list.push('dup');
+  return out;
+}
+function dwFlagBadges(fl){
+  return fl.list.map(k=>{
+    const i = DW_FLAG_INFO[k];
+    const extra = k==='nogps' ? ` (${fl.nogps})` : k==='far' ? ` (${_dwKm(fl.farMax)})` : k==='sefar' ? ` (${_dwKm(fl.se)})` : k==='dup' ? ` (${fl.dup})` : '';
+    return `<span class="badge ${i.cls}" style="font-size:10px">${i.ico} ${L(i.np,i.bh)}${extra}</span>`;
+  }).join(' ');
+}
+
+// ═══ 🧹 KAAM KO KISIM ═══════════════════════════════════════════════════
+const DW_KT_DEFAULT = ['सडक सफाइ','नाला सफाइ','फोहोर संकलन','कन्टेनर/डम्पिङ सफाइ','झारपात/घाँस काट्ने','धुवाँ (fogging)','चुना/ब्लिचिङ छर्ने','मरेको जनावर उठाउने','रातिको बजार सफाइ','निर्माण फोहोर/माटो उठाउने','शौचालय सफाइ','अन्य'];
+function dwKaamTypes(){
+  let v = null;
+  try{ const row = (DB.data['nk_settings']||[]).find(s=>s.setting_key==='dw_kaam_types' && !s.deleted_at); v = row ? row.setting_value : localStorage.getItem('nk_setting_dw_kaam_types'); }catch(e){}
+  try{ const a = JSON.parse(v||'null'); if (Array.isArray(a)){ const c = a.map(x=>String(x||'').trim()).filter(Boolean); if (c.length) return [...new Set(c)]; } }catch(e){}
+  return DW_KT_DEFAULT.slice();
+}
+function dwCanEditKaamTypes(){
+  const u = CURRENT_USER; if (!u) return false;
+  const r = String(u.role||'').toLowerCase();
+  try{ return r==='admin' || r==='office' || isManagerRole(r) || canAccess('operation'); }catch(e){ return r==='admin'; }
+}
+function dwEditKaamTypes(){
+  if (!dwCanEditKaamTypes()){ showToast(L('Admin/Office le matra','खाली एडमिन/अफिस'),'err'); return; }
+  openModal('🧹 '+L('Kaam ko kisim — list','काम के किसिम — लिस्ट'), `
+    <div class="hint mb8">${L('Euta line ma euta kisim. Yo list form ma "Kaam ko kisim" ma aaucha. Hataeko kisim purano kaam ma jastai rahancha.','एक लाइन में एक किसिम। ई लिस्ट फॉर्म में आई। हटावल किसिम पुरान काम में ओइसहीं रही।')}</div>
+    <textarea id="dw_kt_edit" rows="12" style="width:100%">${escHtml(dwKaamTypes().join('\n'))}</textarea>
+    <div class="modal-acts">
+      <button class="btn btn-primary" onclick="dwSaveKaamTypes()">${L('💾 Save','💾 सेभ करीं')}</button>
+      <button class="btn btn-outline" onclick="document.getElementById('dw_kt_edit').value=DW_KT_DEFAULT.join('\\n')">↺ ${L('Default','डिफ़ॉल्ट')}</button>
+      <button class="btn btn-outline" onclick="closeModal()">${t('cancel')}</button>
+    </div>`);
+}
+async function dwSaveKaamTypes(){
+  const a = [...new Set((document.getElementById('dw_kt_edit')?.value||'').split('\n').map(x=>x.trim()).filter(Boolean))].slice(0,60);
+  if (!a.length){ showToast(L('Kamtima euta kisim chahincha','कम से कम एक किसिम चाहीं'),'err'); return; }
+  await setSetting('dw_kaam_types', JSON.stringify(a));
+  showToast(L('🧹 Kaam ko kisim save bhayo','🧹 काम के किसिम सेभ भइल'),'ok');
+  closeModal(); refreshCurrentPage();
+}
+
+// ═══ 🔔 SAMJHAUNE (Adhuro / lamo samay chalirahe) ═════════════════════════
+// Aafno (entry gareko wa aafno team ko) kaam: aaja 4 ghanta bhanda badhi
+// "chalirahe" + pachhillo 7 din ka "Adhuro" — Dashboard ra Kaam Talika ma
+// mathi dekhincha; thichda tyo list khulcha. Team-lead/Report herne le
+// sabai team ko jamma pani dekhchan.
+const DW_LONG_MIN = 240, DW_REMIND_DAYS = 7;
+function dwIsMine(r){
+  const u = CURRENT_USER; if (!u) return false;
+  return (u.username && r.entered_by===u.username) || (u.full_name && r.supervisor===u.full_name);
+}
+function _dwRunMins(r){
+  if (!r.start_time) return null;
+  const [h,m] = String(r.start_time).split(':').map(Number); if (isNaN(h)) return null;
+  const n = new Date(); let d = (n.getHours()*60+n.getMinutes()) - (h*60+(m||0));
+  return d < 0 ? null : d;
+}
+function dwReminderData(){
+  const today = bsTodayKey(), from = _dwShift(today, -DW_REMIND_DAYS);
+  const rows = liveRows('nk_daily_work');
+  const calc = list => {
+    let long = 0, open = 0, old = 0;
+    list.forEach(r=>{
+      const st = dwState(r, today);
+      if (st==='running'){ const m = _dwRunMins(r); if (m!=null && m >= DW_LONG_MIN) long++; }
+      else if (st==='open'){ if ((r.date_bs||'') >= from) open++; else old++; }
+    });
+    return {long, open, old};
+  };
+  const mine = calc(rows.filter(dwIsMine));
+  const team = dwCanReport() ? calc(rows) : null;
+  return {today, from, mine, team};
+}
+function dwReminderHide(){ try{ localStorage.setItem('nk_dw_rem_hide', bsTodayKey()); }catch(e){} refreshCurrentPage(); }
+function dwReminderGo(kind, mine){
+  const f = _dwF(), today = bsTodayKey();
+  f.ward=''; f.sup=''; f.thau=''; f.q=''; f.kt=''; f.flag=''; f.mine = !!mine;
+  if (kind==='long'){ f.preset='today'; f.status='running'; }
+  else { f.preset='custom'; f.from=_dwShift(today, -DW_REMIND_DAYS); f.to=today; f.status='open'; }
+  f.limit = DW_PAGE;
+  window._dwView = dwCanList() ? 'list' : 'report';
+  if (CUR_PAGE!=='dailywork') gotoPage('dailywork'); else refreshCurrentPage();
+  try{ window.scrollTo(0,0); }catch(e){}
+}
+function dwReminderBanner(){
+  try{
+    if (!canAccess('dailywork') || !(dwCanList() || dwCanReport())) return '';
+    try{ if (localStorage.getItem('nk_dw_rem_hide')===bsTodayKey()) return ''; }catch(e){}
+    const R = dwReminderData(), M = R.mine, T = R.team;
+    const lines = [];
+    if (M.long) lines.push(`<button class="btn btn-sm" style="background:#fff;color:var(--cy);border:1px solid var(--cy);white-space:normal;text-align:left;line-height:1.35;height:auto;padding:8px 10px" onclick="dwReminderGo('long',true)">🔵 ${L('Mero','हमार')} ${M.long} ${L('kaam 4 ghanta bhanda badhi chalirahe — sakiye "Kaam Sakiyo" thichnu','काम 4 घंटा से जादा चलत बा — खतम भइला पर "काम खतम" दबाईं')} →</button>`);
+    if (M.open) lines.push(`<button class="btn btn-sm" style="background:#fff;color:var(--y);border:1px solid var(--y);white-space:normal;text-align:left;line-height:1.35;height:auto;padding:8px 10px" onclick="dwReminderGo('open',true)">⚠ ${L('Mero','हमार')} ${M.open} ${L('kaam Adhuro (pachhillo 7 din) — sakiyeko photo halnu','काम अधूरा (पिछला 7 दिन) — खतम के फोटो डालीं')} →</button>`);
+    if (T && (T.long || T.open) && (T.long!==M.long || T.open!==M.open)){
+      lines.push(`<div class="hint" style="margin-top:2px">👥 ${L('Sabai team','सब टोली')}: ${T.long?`<a href="javascript:void 0" onclick="dwReminderGo('long',false)">🔵 ${T.long} ${L('lamo samay chalirahe','देर से चलत')}</a>`:''}${T.long&&T.open?' · ':''}${T.open?`<a href="javascript:void 0" onclick="dwReminderGo('open',false)">⚠ ${T.open} ${L('Adhuro (7 din)','अधूरा (7 दिन)')}</a>`:''}</div>`);
+    }
+    if (!lines.length) return '';
+    return `<div class="card nk-dw-remind" style="border-left:4px solid var(--y);background:var(--yp);padding:10px 12px">
+      <div class="flex-between" style="gap:8px"><b>🔔 ${L('Kaam Talika — samjhana','काम तालिका — याद दिलावल')}</b>
+        <button class="btn btn-sm btn-outline" style="padding:2px 8px" title="${L('Aaja lukaune','आज लुकाईं')}" onclick="dwReminderHide()">✕</button></div>
+      <div class="flex gap8 mt8" style="flex-direction:column;align-items:stretch">${lines.join('')}</div>
+    </div>`;
+  }catch(e){ return ''; }
+}
+// Supervisor lai WhatsApp ma samjhaune msg (Report ma)
+function dwSupMobile(name){
+  const s = liveRows('nk_staff').find(x=>x.full_name===name);
+  return s ? (s.mobile||'') : '';
+}
+function dwRemindMsg(name, rows, today){
+  const top = rows.slice(0,6).map(r=>`• ${fmtBsDate(r.date_bs)} · Ward ${r.ward||''} · ${r.thau||''}${r.kaam_type?' ('+r.kaam_type+')':''}`).join('\n');
+  return `Namaste ${name} ji,\nKaam Talika ma tapaiko ${rows.length} kaam ko "Kaam Sakiyo" (sakiyeko photo) baki chha:\n${top}${rows.length>6?`\n… ra ${rows.length-6} aru`:''}\n\nKripaya app ma Kaam Talika kholi "✅ Kaam Sakiyo" thichera photo halnu hola.\n— ${APP_CONFIG.ORG_NAME}`;
+}
+
 // ═══ KAAM TALIKA — "📸 Kaam" (list) + "📊 Report" ═══════════════════════
 // Dubai tab ma eutai filter: miti (Aaja / Hijo / Yo hapta / Yo mahina /
 // Gata mahina / Aa.Ba. / Sabai / 📅 Miti chhannu + ◀ ▶ le din/mahina sarne),
@@ -14403,7 +14723,8 @@ function dwCanReport(){
 function _dwF(){
   const f = window._dwFilters || (window._dwFilters = {});
   if (!f.preset) f.preset = (f.date==='all') ? 'all' : 'today';
-  ['ward','sup','status','thau','q','from','to'].forEach(k=>{ if (f[k]==null) f[k]=''; });
+  ['ward','sup','status','thau','q','from','to','kt','flag'].forEach(k=>{ if (f[k]==null) f[k]=''; });
+  f.mine = !!f.mine;
   if (!f.limit) f.limit = DW_PAGE;
   return f;
 }
@@ -14455,10 +14776,14 @@ function dwData(skipStatus){
   if (f.ward) rows = rows.filter(r=>String(r.ward||'')===f.ward);
   if (f.sup) rows = rows.filter(r=>(r.supervisor||'')===f.sup);
   if (f.thau) rows = rows.filter(r=>f.thau==='__none' ? !(r.thau||'').trim() : (r.thau||'')===f.thau);
+  if (f.kt) rows = rows.filter(r=>f.kt==='__none' ? !(r.kaam_type||'').trim() : (r.kaam_type||'')===f.kt);
+  if (f.mine) rows = rows.filter(dwIsMine);
+  const ctx = dwFlagCtx();
+  if (f.flag) rows = rows.filter(r=>{ const fl = dwFlags(r, ctx).list; return f.flag==='any' ? fl.length>0 : fl.includes(f.flag); });
   if (f.q){
     const toks = _msNorm(f.q).split(' ').filter(Boolean);
     rows = rows.filter(r=>{
-      const h = _msNorm([r.thau, r.note, r.end_note, r.supervisor, 'ward '+(r.ward||''), r.entered_by, r.date_bs].join(' '));
+      const h = _msNorm([r.thau, r.kaam_type, r.note, r.end_note, r.supervisor, 'ward '+(r.ward||''), r.entered_by, r.date_bs].join(' '));
       return toks.every(tk=>h.includes(tk));
     });
   }
@@ -14467,20 +14792,23 @@ function dwData(skipStatus){
   const cnt = {all:base.length, running:0, done:0, open:0};
   base.forEach(r=>{ cnt[dwState(r,today)]++; });
   if (!skipStatus && f.status) rows = rows.filter(r=>dwState(r,today)===f.status);
-  return {f, range, today, rows, base, cnt};
+  return {f, range, today, rows, base, cnt, ctx};
 }
 function _dwSupOptions(){
   const s = new Set(dwSupervisors());
   liveRows('nk_daily_work').forEach(r=>{ if (r.supervisor) s.add(r.supervisor); });
   return [...s].sort((a,b)=>a.localeCompare(b));
 }
-function dwFiltersActive(f){ return !!(f.ward||f.sup||f.thau||f.status||f.q); }
+function dwFiltersActive(f){ return !!(f.ward||f.sup||f.thau||f.status||f.q||f.kt||f.flag||f.mine); }
 function dwFilterText(d){
   const f = d.f, st = {running:L('Chalirahe','चलत बा'), done:L('Sakiyo','खतम'), open:L('Adhuro','अधूरा')};
   const p = [L('Miti: ','तारीख: ')+d.range.label];
   if (f.ward) p.push('Ward: '+f.ward);
   if (f.thau) p.push(L('Thau: ','जगह: ')+(f.thau==='__none'?L('(nalekheko)','(नइखे)'):f.thau));
   if (f.sup) p.push('Supervisor: '+f.sup);
+  if (f.kt) p.push(L('Kisim: ','किसिम: ')+(f.kt==='__none'?L('(nalekheko)','(नइखे)'):f.kt));
+  if (f.flag) p.push(L('Photo jaanch: ','फोटो जाँच: ')+(f.flag==='any'?L('kunai shanka','कवनो शंका'):L(DW_FLAG_INFO[f.flag].np, DW_FLAG_INFO[f.flag].bh)));
+  if (f.mine) p.push(L('Mero kaam matra','हमार काम खाली'));
   if (f.status) p.push('Status: '+st[f.status]);
   if (f.q) p.push(L('Khoj: ','खोज: ')+f.q);
   return p.join(' · ');
@@ -14522,7 +14850,7 @@ function dwStep(dir){
 }
 function dwSet(key, val){ const f = _dwF(); f[key] = val; f.limit = DW_PAGE; refreshCurrentPage(); }
 function dwToggleStatus(s){ const f = _dwF(); f.status = (f.status===s) ? '' : s; f.limit = DW_PAGE; refreshCurrentPage(); }
-function dwReset(){ const f = _dwF(); f.ward=''; f.sup=''; f.thau=''; f.status=''; f.q=''; f.limit=DW_PAGE; refreshCurrentPage(); }
+function dwReset(){ const f = _dwF(); f.ward=''; f.sup=''; f.thau=''; f.status=''; f.q=''; f.kt=''; f.flag=''; f.mine=false; f.limit=DW_PAGE; refreshCurrentPage(); }
 let _dwQT = null;
 function dwSetQ(v){
   clearTimeout(_dwQT);
@@ -14553,6 +14881,8 @@ function dwFilterHtml(d){
   const sel = 'padding:7px;font-size:12px';
   const thauList = dwThauSuggestions();
   if (f.thau && f.thau!=='__none' && !thauList.includes(f.thau)) thauList.unshift(f.thau);
+  const ktList = [...new Set([...dwKaamTypes(), ...liveRows('nk_daily_work').map(r=>r.kaam_type).filter(Boolean)])];
+  if (f.kt && f.kt!=='__none' && !ktList.includes(f.kt)) ktList.unshift(f.kt);
   return `
   <div class="card" style="padding:10px 12px">
     <div class="chip-group mb8">
@@ -14586,12 +14916,25 @@ function dwFilterHtml(d){
           <option value="">${L('— Sabai —','— सब —')}</option>
           ${_dwSupOptions().map(s=>`<option value="${escHtml(s)}" ${f.sup===s?'selected':''}>${escHtml(s)}</option>`).join('')}
         </select></div>
+      <div class="field" style="margin-bottom:0;flex:2;min-width:140px"><label style="font-size:10px">🧹 ${L('Kaam ko kisim','काम के किसिम')}</label>
+        <select onchange="dwSet('kt',this.value)" style="${sel}">
+          <option value="">${L('— Sabai kisim —','— सब किसिम —')}</option>
+          <option value="__none" ${f.kt==='__none'?'selected':''}>${L('⚠ Kisim nalekheko','⚠ किसिम नइखे')}</option>
+          ${ktList.map(k=>`<option value="${escHtml(k)}" ${f.kt===k?'selected':''}>${escHtml(k)}</option>`).join('')}
+        </select></div>
+      <div class="field" style="margin-bottom:0;flex:2;min-width:140px"><label style="font-size:10px">🛡 ${L('Photo jaanch','फोटो जाँच')}</label>
+        <select onchange="dwSet('flag',this.value)" style="${sel}${f.flag?';border-color:var(--r)':''}">
+          <option value="">${L('— Sabai —','— सब —')}</option>
+          <option value="any" ${f.flag==='any'?'selected':''}>⚠ ${L('Kunai shanka bhaeko','कवनो शंका वाला')}</option>
+          ${Object.keys(DW_FLAG_INFO).map(k=>`<option value="${k}" ${f.flag===k?'selected':''}>${DW_FLAG_INFO[k].ico} ${L(DW_FLAG_INFO[k].np, DW_FLAG_INFO[k].bh)}</option>`).join('')}
+        </select></div>
     </div>
     <div class="chip-group mb8">
       <button class="chip ${!f.status?'active':''}" onclick="dwSet('status','')">${L('Sabai','सब')} (${d.cnt.all})</button>
       <button class="chip ${f.status==='running'?'active':''}" onclick="dwToggleStatus('running')">🔵 ${L('Chalirahe','चलत बा')} (${d.cnt.running})</button>
       <button class="chip ${f.status==='done'?'active':''}" onclick="dwToggleStatus('done')">✅ ${L('Sakiyo','खतम')} (${d.cnt.done})</button>
       <button class="chip ${f.status==='open'?'active':''}" onclick="dwToggleStatus('open')" ${d.cnt.open?'style="border-color:var(--y);color:var(--y)"':''}>⚠ ${L('Adhuro','अधूरा')} (${d.cnt.open})</button>
+      <button class="chip ${f.mine?'active':''}" onclick="dwSet('mine',!_dwF().mine)">👤 ${L('Mero matra','हमार खाली')}</button>
     </div>
     <div class="flex gap8" style="align-items:center">
       <input id="dw_q" type="text" class="live-search-box" style="flex:1;padding:8px 10px;font-size:13px;border:1.5px solid var(--s4);border-radius:var(--rsm)" autocomplete="off"
@@ -14602,11 +14945,13 @@ function dwFilterHtml(d){
 }
 
 /* ---------- 📸 KAAM (list) ---------- */
-function dwCardHtml(r, today){
+function dwCardHtml(r, today, ctx){
   const st = dwState(r, today);
   const sp = (r.start_photos||[]).length, ep = (r.end_photos||[]).length;
   const canEdit = isManagerRole(CURRENT_USER?.role) || r.entered_by===CURRENT_USER?.username || r.supervisor===CURRENT_USER?.full_name;
   const col = st==='done' ? 'var(--g2)' : st==='open' ? 'var(--y)' : 'var(--cy)';
+  const fl = dwFlags(r, ctx);
+  const runM = st==='running' ? _dwRunMins(r) : null;
   const badge = st==='done' ? `<span class="badge badge-green">${L('✅ Sakiyo','✅ खतम भइल')}</span>`
     : st==='open' ? `<span class="badge badge-amber" title="${L('Aghillo din ko kaam — Kaam Sakiyo thichieko chhaina','पहिले दिन के काम — "काम खतम" ना दबावल गइल')}">${L('⚠ Adhuro','⚠ अधूरा')}</span>`
     : `<span class="badge badge-blue">${L('🔵 Chalirahe','🔵 चलत बा')}</span>`;
@@ -14615,7 +14960,9 @@ function dwCardHtml(r, today){
         <div class="row-card-top">
           <div>
             <div class="row-card-title">${escHtml(roadDisp(r.thau)||L('(Thau nalekheko)','(जगह नइखे)'))} <span class="badge badge-gray" style="font-size:9px">${L('Ward','वार्ड')} ${escHtml(String(r.ward||''))}</span></div>
-            <div class="row-card-meta">${fmtBsDate(r.date_bs)} ${r.start_time?('· 🕐 '+escHtml(r.start_time)):''}${r.end_time?(' → '+escHtml(r.end_time)):''} ${r.supervisor?('· 👨‍💼 '+escHtml(r.supervisor)):''}</div>
+            ${r.kaam_type?`<div class="row-card-meta" style="font-weight:700;color:var(--b3)">🧹 ${escHtml(r.kaam_type)}</div>`:''}
+            <div class="row-card-meta">${fmtBsDate(r.date_bs)} ${r.start_time?('· 🕐 '+escHtml(r.start_time)):''}${r.end_time?(' → '+escHtml(r.end_time)):''} ${r.supervisor?('· 👨‍💼 '+escHtml(r.supervisor)):''}${runM!=null&&runM>=DW_LONG_MIN?` · <span style="color:var(--y);font-weight:700">⏱ ${_dwHm(runM)} ${L('dekhi chalirahe','से चलत')}</span>`:''}</div>
+            ${fl.list.length?`<div style="margin-top:3px;display:flex;gap:4px;flex-wrap:wrap">${dwFlagBadges(fl)}</div>`:''}
             ${r.note?`<div class="row-card-meta">📝 ${escHtml(r.note)}</div>`:''}
             ${r.end_note?`<div class="row-card-meta" style="color:var(--g2)">✅ ${escHtml(r.end_note)}</div>`:''}
           </div>
@@ -14660,7 +15007,7 @@ function dwListHtml(d){
         <span>📅 ${fmtBsDate(last)}</span>
         <span style="font-weight:700;color:var(--s1)">${o.n} ${L('kaam','काम')} · ✅ ${o.done}${o.running?` · 🔵 ${o.running}`:''}${o.open?` · <span style="color:var(--y)">⚠ ${o.open}</span>`:''}</span></div>`;
     }
-    html += dwCardHtml(r, d.today);
+    html += dwCardHtml(r, d.today, d.ctx);
   });
   const left = rows.length - shown.length;
   return `<div class="card">
@@ -14671,15 +15018,29 @@ function dwListHtml(d){
 }
 
 /* ---------- 📊 REPORT ---------- */
-function _dwAgg(rows, today){
+function _dwAgg(rows, today, ctx){
   const mk = ()=>({n:0, done:0, running:0, open:0, mins:0, minsN:0, sp:0, ep:0, days:new Set(), wards:new Set(), sups:new Set(), thaus:new Set(), last:''});
-  const S = mk(), byDay = {}, bySup = {}, byWard = {}, byThau = {};
+  const S = mk(), byDay = {}, bySup = {}, byWard = {}, byThau = {}, byKt = {};
   const get = (m,k)=> m[k] || (m[k]=mk());
-  let noThau=0, noStart=0, noSup=0;
+  let noThau=0, noStart=0, noSup=0, noKt=0;
+  // 🛡 photo jaanch: jamma + supervisor anusar
+  const FL = {any:0, nogps:0, far:0, sefar:0, dup:0, photos:0, photosNoGps:0}, flSup = {};
+  const openBySup = {};
+  ctx = ctx || dwFlagCtx();
   rows.forEach(r=>{
     const st = dwState(r, today), mins = dwMins(r);
-    const th = (r.thau||'').trim();
-    [S, get(byDay, r.date_bs||''), get(bySup, r.supervisor||''), get(byWard, String(r.ward||'')), get(byThau, th||'__none')].forEach(o=>{
+    const th = (r.thau||'').trim(), kt = (r.kaam_type||'').trim();
+    const fl = dwFlags(r, ctx), sk = r.supervisor||'';
+    const all = (r.start_photos||[]).length + (r.end_photos||[]).length;
+    FL.photos += all; FL.photosNoGps += fl.nogps;
+    if (fl.list.length){
+      FL.any++; const o = flSup[sk] || (flSup[sk] = {n:0, any:0, nogps:0, far:0, sefar:0, dup:0});
+      o.any++; fl.list.forEach(k=>{ FL[k]++; o[k]++; });
+    }
+    (flSup[sk] || (flSup[sk] = {n:0, any:0, nogps:0, far:0, sefar:0, dup:0})).n++;
+    if (st==='open') (openBySup[sk] || (openBySup[sk]=[])).push(r);
+    if (!kt) noKt++;
+    [S, get(byDay, r.date_bs||''), get(bySup, sk), get(byWard, String(r.ward||'')), get(byThau, th||'__none'), get(byKt, kt||'__none')].forEach(o=>{
       o.n++; o[st]++;
       if (mins!=null){ o.mins += mins; o.minsN++; }
       o.sp += (r.start_photos||[]).length; o.ep += (r.end_photos||[]).length;
@@ -14690,7 +15051,7 @@ function _dwAgg(rows, today){
     if (!(r.start_photos||[]).length) noStart++;
     if (!r.supervisor) noSup++;
   });
-  return {S, byDay, bySup, byWard, byThau, noThau, noStart, noSup};
+  return {S, byDay, bySup, byWard, byThau, byKt, noThau, noStart, noSup, noKt, FL, flSup, openBySup};
 }
 function _dwPct(o){ return o.n ? Math.round(o.done*100/o.n) : 0; }
 function _dwPctBadge(o){
@@ -14700,7 +15061,7 @@ function _dwPctBadge(o){
 }
 // Report ko table haru (screen, CSV ra A4 print — sabai yahi data bata)
 function dwReportTables(d){
-  const f = d.f, A = _dwAgg(d.rows, d.today);
+  const f = d.f, A = _dwAgg(d.rows, d.today, d.ctx);
   const noOther = !f.ward && !f.thau && !f.q && !f.status;
   // Din: range 62 din samma bhae kaam nabhaeko din pani (0) dekhaune — chhuteko din thaha hos
   let dayKeys = Object.keys(A.byDay).filter(Boolean);
@@ -14718,7 +15079,9 @@ function dwReportTables(d){
   if (noOther && !f.sup) for (let w=1; w<=APP_CONFIG.WARDS; w++){ const k=String(w); if (!A.byWard[k]) A.byWard[k] = {n:0,done:0,running:0,open:0,mins:0,minsN:0,sp:0,ep:0,days:new Set(),wards:new Set(),sups:new Set(),thaus:new Set(),last:''}; }
   const wardKeys = Object.keys(A.byWard).sort((a,b)=>{ const na=+a, nb=+b; return (isNaN(na)?999:na)-(isNaN(nb)?999:nb); });
   const thauKeys = Object.keys(A.byThau).sort((a,b)=>A.byThau[b].n-A.byThau[a].n);
-  return {A, dayKeys, supKeys, wardKeys, thauKeys};
+  const ktKeys = Object.keys(A.byKt).sort((a,b)=>(a==='__none')-(b==='__none') || A.byKt[b].n-A.byKt[a].n);
+  const flSupKeys = Object.keys(A.flSup).filter(k=>A.flSup[k].any).sort((a,b)=>A.flSup[b].any-A.flSup[a].any || a.localeCompare(b));
+  return {A, dayKeys, supKeys, wardKeys, thauKeys, ktKeys, flSupKeys};
 }
 function dwReportHtml(d){
   const T = dwReportTables(d), A = T.A, S = A.S;
@@ -14735,6 +15098,7 @@ function dwReportHtml(d){
   if (A.noThau) warn.push(`<div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--s5);cursor:pointer" onclick="dwDrill('thau','__none')"><span>🛣 ${L('Thau/Road nalekheko kaam','जगह/रोड बिना काम')}</span><span class="badge badge-amber">${A.noThau} →</span></div>`);
   if (A.noStart) warn.push(`<div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--s5)"><span>📸 ${L('Suru ko photo nabhaeko kaam','शुरू के फोटो बिना काम')}</span><span class="badge badge-red">${A.noStart}</span></div>`);
   if (A.noSup) warn.push(`<div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--s5)"><span>👨‍💼 ${L('Supervisor nachhaneko kaam','सुपरभाइजर बिना काम')}</span><span class="badge badge-amber">${A.noSup}</span></div>`);
+  if (A.FL.any) warn.push(`<div class="flex-between" style="padding:8px 0;border-bottom:1px solid var(--s5);cursor:pointer" onclick="dwDrill('flag','any')"><span>🛡 ${L('Photo ma shanka (GPS chhaina / tadha / dohoriyeko)','फोटो में शंका (GPS नइखे / दूर / दोहरावल)')}</span><span class="badge badge-red">${A.FL.any} →</span></div>`);
   const zeroSup = T.supKeys.filter(k=>k && !A.bySup[k].n).length;
   const zeroWard = T.wardKeys.filter(k=>k && !A.byWard[k].n).length;
   const lastSum = S.running ? ` · 🔵 ${S.running}` : '';
@@ -14787,6 +15151,60 @@ function dwReportHtml(d){
         <span style="font-size:13px">${k==='__none'?`<span style="color:var(--y)">⚠ ${L('Thau nalekheko','जगह नइखे लिखल')}</span>`:escHtml(roadDisp(k))} <span class="hint">(W${escHtml([...o.wards].filter(Boolean).sort((a,b)=>a-b).join(', '))})</span></span>
         <span><span class="badge badge-gray">${o.n} ${L('kaam','काम')}</span> <span class="badge badge-green">✅ ${o.done}</span>${o.open?` <span class="badge badge-amber">⚠ ${o.open}</span>`:''}</span>
       </div>`; }).join('')}
+  </div>
+  ${dwKtCardHtml(T)}
+  ${dwFlagCardHtml(T, d)}
+  ${dwRemindCardHtml(T, d)}`;
+}
+function dwKtCardHtml(T){
+  const A = T.A;
+  if (!T.ktKeys.length) return '';
+  const num = (v, col) => `<td style="text-align:right${col&&v?';color:'+col+';font-weight:700':''}">${v||'·'}</td>`;
+  return `<div class="card">
+    <div class="flex-between mb8"><div class="card-title" style="margin:0">🧹 ${L('Kaam ko Kisim Anusar','काम के किसिम अनुसार')}</div>
+      <span class="flex gap8">${dwCanEditKaamTypes()?`<button class="btn btn-sm btn-outline" onclick="dwEditKaamTypes()">⚙ ${L('List','लिस्ट')}</button>`:''}<button class="btn btn-sm btn-outline" onclick="dwPrint('kt')">🖨 A4</button></span></div>
+    ${A.noKt ? `<div class="hint mb8">ℹ ${A.noKt} ${L('purano kaam ma kisim chhaina (naya form ma aba aniwarya)','पुरान काम में किसिम नइखे (नया फॉर्म में अब जरूरी)')}</div>` : ''}
+    <div class="tbl-wrap"><table>
+      <thead><tr><th>${L('Kisim','किसिम')}</th><th style="text-align:right">${L('Kaam','काम')}</th><th style="text-align:right">✅</th><th style="text-align:right">⚠</th><th style="text-align:right">%</th><th style="text-align:right">⏱ ${L('Ausat','औसत')}</th><th style="text-align:right">Ward</th></tr></thead>
+      <tbody>${T.ktKeys.map(k=>{ const o=A.byKt[k]; return `<tr onclick="dwDrill('kt','${_dwArg(k)}')" style="cursor:pointer${k==='__none'?';opacity:.6':''}"><td style="white-space:normal;min-width:120px">${k==='__none'?L('(Kisim nalekheko)','(किसिम नइखे)'):escHtml(k)}</td><td style="text-align:right;font-weight:700">${o.n}</td>${num(o.done,'var(--g2)')}${num(o.open,'var(--y)')}<td style="text-align:right">${_dwPctBadge(o)}</td><td style="text-align:right">${_dwHm(o.minsN?o.mins/o.minsN:null)}</td>${num([...o.wards].filter(Boolean).length)}</tr>`; }).join('')}</tbody>
+    </table></div>
+  </div>`;
+}
+function dwFlagCardHtml(T, d){
+  const A = T.A, FL = A.FL;
+  const pct = FL.photos ? Math.round(FL.photosNoGps*100/FL.photos) : 0;
+  const row = (k, txt, cls) => `<div class="flex-between" style="padding:7px 0;border-bottom:1px solid var(--s5);${FL[k]?'cursor:pointer':''}" ${FL[k]?`onclick="dwDrill('flag','${k}')"`:''}><span style="font-size:13px">${txt}</span><span class="badge ${FL[k]?cls:'badge-gray'}">${FL[k]}${FL[k]?' →':''}</span></div>`;
+  const num = (v) => `<td style="text-align:right${v?';color:var(--r);font-weight:700':''}">${v||'·'}</td>`;
+  return `<div class="card">
+    <div class="flex-between mb8"><div class="card-title" style="margin:0">🛡 ${L('Photo Jaanch (GPS / nakkali)','फोटो जाँच (GPS / नकली)')}</div><button class="btn btn-sm btn-outline" onclick="dwPrint('flag')">🖨 A4</button></div>
+    <div class="hint mb8">${L('Jamma photo','कुल फोटो')} ${FL.photos} · ${L('GPS nabhaeko photo','GPS बिना फोटो')} ${FL.photosNoGps} (${pct}%) · ${L('Kaam thichda list khulcha','दबइला पर लिस्ट खुली')}</div>
+    ${row('nogps', `📍 ${L('GPS nabhaeko photo bhaeko kaam','GPS बिना फोटो वाला काम')}`, 'badge-amber')}
+    ${row('far', `🗺 ${L('Ward bhanda '+DW_RULE.wardKm+' km bhanda tadha khicheko','वार्ड से '+DW_RULE.wardKm+' km से दूर खींचल')}`, 'badge-red')}
+    ${row('sefar', `↔ ${L('Suru ra sakiyeko photo '+DW_RULE.seKm+' km bhanda tadha','शुरू आ खतम फोटो '+DW_RULE.seKm+' km से दूर')}`, 'badge-amber')}
+    ${row('dup', `♻️ ${L('Eutai photo dohoryaeko (arko kaam ma pani)','एके फोटो दोहरावल (दोसर काम में भी)')}`, 'badge-red')}
+    ${T.flSupKeys.length ? `<div class="tbl-wrap mt8"><table>
+      <thead><tr><th>Supervisor</th><th style="text-align:right">${L('Kaam','काम')}</th><th style="text-align:right">⚠</th><th style="text-align:right">📍</th><th style="text-align:right">🗺</th><th style="text-align:right">↔</th><th style="text-align:right">♻️</th></tr></thead>
+      <tbody>${T.flSupKeys.map(k=>{ const o=A.flSup[k]; return `<tr onclick="dwFlagSup('${_dwArg(k)}')" style="cursor:pointer"><td style="white-space:normal;min-width:120px">${k?escHtml(k):L('(Supervisor chhaina)','(सुपरभाइजर नइखे)')}</td><td style="text-align:right">${o.n}</td><td style="text-align:right;font-weight:700">${o.any} <span class="hint">(${Math.round(o.any*100/Math.max(1,o.n))}%)</span></td>${num(o.nogps)}${num(o.far)}${num(o.sefar)}${num(o.dup)}</tr>`; }).join('')}</tbody>
+    </table></div>` : `<div class="hint mt8" style="color:var(--g2)">✅ ${L('Yo miti/filter ma shanka lagne photo chhaina','ई तारीख/फिल्टर में शंका वाला फोटो नइखे')}</div>`}
+    <div class="hint mt8">ℹ ${L('Ward ko bich = tyo ward ka sabai photo ko median location (kamtima '+DW_RULE.wardMinN+' photo). Shanka = jaanch garnu parne, aafai galat bhanne hoina.','वार्ड के बीच = ओह वार्ड के सब फोटो के median लोकेशन। शंका = जाँचे के, अपने आप गलत ना।')}</div>
+  </div>`;
+}
+function dwFlagSup(enc){ const f = _dwF(); f.sup = decodeURIComponent(enc||''); f.flag = 'any'; f.limit = DW_PAGE; if (dwCanList()) window._dwView='list'; refreshCurrentPage(); try{ window.scrollTo(0,0); }catch(e){} }
+function dwRemindCardHtml(T, d){
+  const A = T.A;
+  const keys = Object.keys(A.openBySup).sort((a,b)=>A.openBySup[b].length-A.openBySup[a].length);
+  if (!keys.length) return '';
+  return `<div class="card">
+    <div class="card-title">📲 ${L('Samjhauna — Adhuro kaam (supervisor lai WhatsApp)','याद दिलाईं — अधूरा काम (सुपरभाइजर के WhatsApp)')}</div>
+    <div class="hint mb8">${L('WhatsApp ma message tayar bhaera khulcha — Send matra thichnu','WhatsApp में मैसेज तैयार होके खुली — Send दबाईं')}</div>
+    ${keys.map(k=>{
+      const list = A.openBySup[k].slice().sort((a,b)=>(b.date_bs||'').localeCompare(a.date_bs||''));
+      const mob = k ? dwSupMobile(k) : '';
+      const link = mob ? waLink(mob, dwRemindMsg(k, list, d.today)) : '';
+      return `<div class="flex-between" style="padding:7px 0;border-bottom:1px solid var(--s5);gap:8px">
+        <span style="font-size:13px;cursor:pointer" onclick="dwDrill('sup','${_dwArg(k)}')">${k?escHtml(k):L('(Supervisor chhaina)','(सुपरभाइजर नइखे)')} <span class="badge badge-amber">⚠ ${list.length}</span> <span class="hint">${L('pachhillo','अंतिम')} ${escHtml(list[0].date_bs||'')}</span></span>
+        ${link ? `<a class="btn btn-sm" style="background:#25D366;color:#fff;white-space:nowrap" href="${link}" target="_blank" rel="noopener">📲 WhatsApp</a>` : `<span class="hint">${k?L('mobile chhaina','मोबाइल नइखे'):''}</span>`}
+      </div>`; }).join('')}
   </div>`;
 }
 
@@ -14795,16 +15213,17 @@ const _DW_ST = {done:'Sakiyo', running:'Chalirahe', open:'Adhuro'};
 function dwExportCsv(){
   const d = dwData(false);
   if (!d.rows.length){ showToast(L('Kaam chhaina','काम नइखे'),'err'); return; }
-  const head = ['S.N.','Miti','Bar','Ward','Thau/Road','Supervisor','Suru samay','Sakiyo samay','Samay (minute)','Status','Suru photo','Sakiyo photo','Note','Sakiyo note','Entry garne'];
-  const lines = d.rows.map((r,i)=>{ const p = parseBsKey(r.date_bs||'2000-01-01'); return [i+1, r.date_bs||'', r.date_bs?bsWeekday(p.y,p.m,p.d):'', r.ward||'', r.thau||'', r.supervisor||'',
-    r.start_time||'', r.end_time||'', dwMins(r)??'', _DW_ST[dwState(r,d.today)], (r.start_photos||[]).length, (r.end_photos||[]).length,
-    r.note||'', r.end_note||'', r.entered_by||'']; });
+  const head = ['S.N.','Miti','Bar','Ward','Thau/Road','Kaam ko kisim','Supervisor','Suru samay','Sakiyo samay','Samay (minute)','Status','Suru photo','Sakiyo photo','GPS nabhaeko photo','Photo jaanch','Note','Sakiyo note','Entry garne'];
+  const lines = d.rows.map((r,i)=>{ const p = parseBsKey(r.date_bs||'2000-01-01'); const fl = dwFlags(r, d.ctx); return [i+1, r.date_bs||'', r.date_bs?bsWeekday(p.y,p.m,p.d):'', r.ward||'', r.thau||'', r.kaam_type||'', r.supervisor||'',
+    r.start_time||'', r.end_time||'', dwMins(r)??'', _DW_ST[dwState(r,d.today)], (r.start_photos||[]).length, (r.end_photos||[]).length, fl.nogps,
+    fl.list.map(k=>DW_FLAG_INFO[k].np).join('; '), r.note||'', r.end_note||'', r.entered_by||'']; });
   const nm = d.range.all ? 'sabai' : (d.range.single ? d.range.from : d.range.from+'_'+d.range.to);
   _csvDownload(`Kaam_Talika_${nm}.csv`, [[APP_CONFIG.ORG_NAME+' — '+APP_CONFIG.CITY_NAME], ['Kaam Talika Report'], [dwFilterText(d)], [], head, ...lines]);
 }
 function dwPrint(kind){
   const d = dwData(false);
   if (!d.rows.length && kind!=='sup' && kind!=='ward'){ showToast(L('Kaam chhaina','काम नइखे'),'err'); return; }
+  if (kind==='flag' && !dwReportTables(d).flSupKeys.length){ showToast(L('Shanka bhaeko kaam chhaina','शंका वाला काम नइखे'),'ok'); return; }
   const T = dwReportTables(d), A = T.A, S = A.S;
   const meta = [dwFilterText(d), `Jamma kaam: ${S.n} · Sakiyo: ${S.done} (${_dwPct(S)}%) · Adhuro: ${S.open}${S.running?' · Chalirahe: '+S.running:''}`];
   const R = (n)=>({h:n, align:'right'});
@@ -14826,9 +15245,22 @@ function dwPrint(kind){
       T.wardKeys.map(k=>{ const o=A.byWard[k]; return [k?'Ward '+k:'—', o.n, o.done, o.open, o.n?_dwPct(o)+'%':'', o.thaus.size, [...o.sups].filter(Boolean).length]; }),
       ['JAMMA', S.n, S.done, S.open, _dwPct(S)+'%', '', '']);
   }
+  if (kind==='kt'){
+    return printA4('Kaam Talika — Kaam ko Kisim Anusar', meta,
+      [{h:'Kaam ko kisim',w:'34%'},{...R('Kaam'),w:'11%'},{...R('Sakiyo'),w:'11%'},{...R('Adhuro'),w:'11%'},{...R('%'),w:'9%'},{...R('Ausat samay'),w:'14%'},{...R('Ward'),w:'10%'}],
+      T.ktKeys.map(k=>{ const o=A.byKt[k]; return [k==='__none'?'(Kisim nalekheko)':k, o.n, o.done, o.open, o.n?_dwPct(o)+'%':'', _dwHm(o.minsN?o.mins/o.minsN:null), [...o.wards].filter(Boolean).length]; }),
+      ['JAMMA', S.n, S.done, S.open, _dwPct(S)+'%', _dwHm(S.minsN?S.mins/S.minsN:null), '']);
+  }
+  if (kind==='flag'){
+    const FL = A.FL;
+    return printA4('Kaam Talika — Photo Jaanch (GPS / dohoriyeko)', [...meta, `Shanka bhaeko kaam: ${FL.any} · GPS chhaina: ${FL.nogps} · Ward bata tadha: ${FL.far} · Suru-sakiyo tadha: ${FL.sefar} · Dohoriyeko photo: ${FL.dup}`],
+      [{h:'Supervisor',w:'30%'},{...R('Kaam'),w:'10%'},{...R('Shanka'),w:'12%'},{...R('GPS chhaina'),w:'12%'},{...R('Ward bata tadha'),w:'12%'},{...R('Suru-sakiyo tadha'),w:'12%'},{...R('Dohoriyeko'),w:'12%'}],
+      T.flSupKeys.map(k=>{ const o=A.flSup[k]; return [k||'(Supervisor chhaina)', o.n, o.any, o.nogps, o.far, o.sefar, o.dup]; }),
+      ['JAMMA', S.n, FL.any, FL.nogps, FL.far, FL.sefar, FL.dup]);
+  }
   return printA4('Kaam Talika — Kaam List', meta,
-    [{h:'S.N.',w:'6%',align:'right'},{h:'Miti',w:'15%'},{h:'Ward',w:'6%'},{h:'Thau/Road',w:'24%'},{h:'Supervisor',w:'19%'},{h:'Samay',w:'15%'},{h:'Status',w:'9%'},{h:'Photo',w:'6%',align:'right'}],
-    d.rows.map((r,i)=>[i+1, fmtBsDate(r.date_bs), r.ward||'', r.thau||'(nalekheko)', r.supervisor||'', (r.start_time||'')+(r.end_time?' → '+r.end_time:''), _DW_ST[dwState(r,d.today)], `${(r.start_photos||[]).length}/${(r.end_photos||[]).length}`]),
+    [{h:'S.N.',w:'5%',align:'right'},{h:'Miti',w:'13%'},{h:'Ward',w:'5%'},{h:'Thau/Road',w:'21%'},{h:'Kisim',w:'14%'},{h:'Supervisor',w:'16%'},{h:'Samay',w:'12%'},{h:'Status',w:'8%'},{h:'Photo',w:'6%',align:'right'}],
+    d.rows.map((r,i)=>[i+1, fmtBsDate(r.date_bs), r.ward||'', r.thau||'(nalekheko)', r.kaam_type||'', r.supervisor||'', (r.start_time||'')+(r.end_time?' → '+r.end_time:''), _DW_ST[dwState(r,d.today)], `${(r.start_photos||[]).length}/${(r.end_photos||[]).length}${dwFlags(r,d.ctx).list.length?' ⚠':''}`]),
     null);
 }
 
@@ -14848,6 +15280,7 @@ function pageDailyWork(){
     <button class="tab-btn ${view==='list'?'active':''}" onclick="window._dwView='list';refreshCurrentPage()">📸 ${L('Kaam','काम')}</button>
     <button class="tab-btn ${view==='report'?'active':''}" onclick="window._dwView='report';refreshCurrentPage()">📊 ${L('Report','रिपोर्ट')}</button>
   </div>` : ''}
+  ${dwReminderBanner()}
   ${view==='list' ? `<p class="hint mb8">${t('dw_hint')}</p>
   <button class="btn btn-primary btn-block mb8" onclick="openDailyWorkForm()">${t('dw_addWork')}</button>` : ''}
   ${dwFilterHtml(d)}
